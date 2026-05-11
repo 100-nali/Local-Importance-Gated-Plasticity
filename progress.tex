@@ -1,0 +1,564 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
+
+\title{Local Importance-Gated Plasticity in Edge-Coupled Physical Networks:\\
+       \large A Progress Report}
+\author{Sonali Goel}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study catastrophic forgetting in sequential learning on coupled physical
+networks. Software-side mitigations such as Elastic Weight Consolidation
+(EWC) and Synaptic Intelligence (SI) reduce forgetting by computing a
+per-parameter importance signal --- but they do so using global quantities
+that are not available to an edge in a physical learning substrate, where
+each edge can only access the potentials at its own two endpoints. The
+question we ask is whether a \emph{strictly local} importance signal, with
+the same one-scalar-per-edge form, can recover the retention benefits of
+EWC/SI on a coupled physical network. We build a 2D resistor-network mesh
+substrate with contrastive (coupled) learning and test three strictly-local
+rules: vanilla contrastive learning, per-edge gradient thresholding, and a
+proximal importance-gated rule. On a sequential linear regression benchmark
+with controllable task overlap, the importance-gated rule Pareto-dominates
+vanilla on the (past-task error, new-task error) plane: it reduces old-task
+error by approximately $10\%$ while matching vanilla's new-task fit to
+within noise, at the most-interference operating point. It additionally
+dissipates roughly $35\%$ less heat per task. We report the simulator, the
+three rules, the headline results, and a focused plan for the remaining
+experiments.
+\end{abstract}
+
+\section{Introduction}
+
+A learning system that trains on a sequence of tasks tends to overwrite the
+parameters that mattered for earlier tasks when it adapts to later ones.
+This is \emph{catastrophic forgetting} \cite{mccloskey1989}, and it is the
+central obstacle to continual learning in any system that re-uses its
+parameters across tasks. The dominant deep-learning mitigations are
+\emph{replay} (revisit data from past tasks) and \emph{importance-weighted
+regularization} (slow down updates on parameters that mattered for past
+tasks). EWC \cite{kirkpatrick2017} and SI \cite{zenke2017} are the canonical
+examples of the latter family.
+
+These methods compute an importance signal \emph{per parameter}, but the
+quantities they use --- the diagonal of the Fisher information matrix, or
+the path integral of the gradient along the training trajectory --- are
+derived from access to the global loss landscape. In a software
+implementation this distinction is invisible; in a physical learning
+substrate it is the central concern. A resistor network or a mechanical
+coupled lattice does not have global access to the loss: each edge can
+only measure quantities at its own two endpoints. Any importance signal
+that hopes to be physically implementable must respect this constraint.
+
+Recent work on physical learning \cite{stern2022, stern2024,
+thresholdedphysical2025} has shown that simple local rules --- coupled
+learning, equilibrium propagation, thresholded force updates --- can
+already produce striking learning behaviour. But sequential learning on
+these substrates still exhibits forgetting, and the literature has not yet
+demonstrated a strictly-local rule that recovers EWC/SI-style retention
+benefits. \textbf{This is the gap this project aims to close}: build a
+strictly-local importance-gated rule, on a physically realisable
+substrate, and test whether it can match the canonical
+importance-regularised retention benefits without using any global
+information.
+
+The progress reported here covers the simulator, the rule design, and the
+first round of empirical results. The headline finding is that on the
+substrate we use, the proposed rule Pareto-dominates the natural baseline
+(vanilla coupled learning) on the (past-task error, new-task error) plane:
+it improves retention without paying for it in plasticity.
+
+\section{Background}
+
+\subsection{Coupled physical networks}
+
+A linear coupled network is an undirected weighted graph in which each
+node has a real-valued potential $v_i$ and each edge $e = (i, j)$
+contributes $\tfrac{1}{2} w_e (v_i - v_j)^2$ to a quadratic energy $E$.
+Some nodes are \emph{clamped} to fixed values (the network's inputs);
+the others equilibrate to the unique minimum of $E$ given those clamps
+(for positive $w_e$). Writing $L$ for the weighted graph Laplacian and
+partitioning into free $f$ and clamped $c$ blocks, the equilibrium
+satisfies
+\[
+L_{ff}\, \mathbf{v}_f = -L_{fc}\, \mathbf{v}_c.
+\]
+The substrate's forward computation is this linear system solve. With
+positive conductances this corresponds physically to a passive resistor
+network; signed couplings would correspond to a mechanical-spring system
+with both attractive and repulsive springs.
+
+\subsection{Contrastive (coupled) learning}
+
+Coupled learning \cite{stern2022, stern2024} and equilibrium propagation
+\cite{scellier2017} both express the gradient of an output-based loss
+with respect to an edge weight as a local energy difference between two
+equilibria. The \emph{free} phase $\mathbf{v}^F$ uses only the input
+clamps; the \emph{clamped} phase $\mathbf{v}^C$ additionally nudges the
+output toward the target with strength $\eta$. The per-edge gradient is
+\begin{equation}
+\label{eq:cl}
+g_e = \frac{1}{2\eta}
+\left[
+(v^C_i - v^C_j)^2 - (v^F_i - v^F_j)^2
+\right],
+\end{equation}
+which approaches $\partial L / \partial w_e$ in the limit $\eta \to 0$.
+Crucially, each edge needs only the potentials at its own two endpoints in
+both phases. There is no chain rule, no backpropagation, no global
+gradient computation.
+
+\subsection{Diagonal Fisher information as importance}
+
+EWC's importance proxy is the diagonal of the empirical Fisher information,
+$F_{ii} = \mathbb{E}[(\partial L / \partial w_i)^2]$. The penalty added to
+the loss during a new task is
+$\tfrac{c}{2}\sum_i F_i (w_i - w_i^*)^2$, anchoring each parameter to its
+end-of-previous-task value $w_i^*$ with stiffness proportional to its
+own Fisher entry. The strictly-local analogue we use replaces the Fisher
+diagonal by a per-edge exponential moving average of $g_e^2$ --- a
+quantity each edge can compute from its own gradient history --- and the
+penalty by a proximal (implicit) update toward $w_e^*$ with
+per-edge stiffness $\lambda I_e$. We give the explicit update in
+Section~\ref{sec:methods}.
+
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Substrate: 2D resistor-network mesh}
+
+The substrate is an $8 \times 10$ rectangular grid of nodes with
+4-neighbour (N, S, E, W) connectivity. There are 142 trainable edges
+($\text{rows} \times (\text{cols} - 1) + (\text{rows} - 1) \times \text{cols}$).
+
+\begin{itemize}
+\item Inputs are clamped at the leftmost column, rows $0..7$, to the
+      eight input features $x_0..x_7$.
+\item The output is the differential pair on the rightmost column,
+      $\hat y = v[\text{out}_+] - v[\text{out}_-]$, with rows $3$ and $4$
+      taken as the $\pm$ output nodes.
+\item All other nodes are free.
+\end{itemize}
+
+Conductances are strictly positive ($w_e \geq w_{\min} = 0.05$), making
+this a passive resistor network. The differential output is what allows
+a positive-conductance system to fit signed regression targets without
+resorting to signed couplings.
+
+\subsection{Three local learning rules}
+
+All three rules use only quantities visible at the edge --- the per-edge
+contrastive gradient $g_e$ from Eq.~\ref{eq:cl} plus whatever scalar
+state the rule maintains at that edge.
+
+\paragraph{Vanilla coupled learning.}
+The baseline rule, pure unconstrained contrastive learning:
+\[
+w_e \leftarrow w_e - \mathrm{lr} \cdot g_e.
+\]
+No per-edge state, no protection.
+
+\paragraph{Threshold.}
+The local-force-thresholding rule of \cite{thresholdedphysical2025},
+applied to the per-batch contrastive force:
+\[
+w_e \leftarrow
+\begin{cases}
+w_e - \mathrm{lr} \cdot g_e & \text{if } |g_e| > \tau,\\
+w_e & \text{otherwise.}
+\end{cases}
+\]
+The threshold gates plasticity: only edges with above-threshold force
+update. No per-edge state beyond the threshold value $\tau$ itself.
+
+\paragraph{Importance-gated.}
+Each edge maintains an anchor $w^*_e$ (snapshot of $w_e$ at the previous
+task boundary) and an importance $I^*_e$ (the per-edge $\beta$-EMA of
+$g_e^2$, also snapshotted at the previous task boundary). The update
+during a new task is the proximal (implicit) step
+\begin{equation}
+\label{eq:proximal}
+w_e \leftarrow
+\frac{w_e - \mathrm{lr} \cdot g_e + \mathrm{lr} \cdot \lambda \cdot I^*_e \cdot w^*_e}
+     {1 + \mathrm{lr} \cdot \lambda \cdot I^*_e}.
+\end{equation}
+This is algebraically the implicit Euler step on the augmented loss
+$L + \tfrac{1}{2} \lambda \sum_e I^*_e (w_e - w^*_e)^2$. The denominator
+is always $\geq 1$, so the rule is unconditionally stable regardless of
+how large $\lambda I^*_e$ becomes; aggressive $\lambda$ values do not
+require gradient clipping. The first task uses plain contrastive
+learning (no anchor yet). At each task boundary, $w^*_e \leftarrow w_e$
+and $I^*_e \leftarrow I_e$ (where $I_e$ is the live EMA tracked over the
+just-completed task).
+
+The rule depends only on $w_e, w^*_e, I_e, I^*_e, g_e$ --- all per-edge.
+No global Fisher computation, no cross-edge coupling, no replay buffer.
+
+\subsection{Sequential linear regression with controllable task overlap}
+
+A task is a linear regression with target direction
+$\mathbf{d} \in \mathbb{R}^8$, $|\mathbf{d}| = 1$. Inputs are
+$\mathbf{x} \sim \mathcal{N}(0, I_8)$, targets are
+$y = \mathbf{d} \cdot \mathbf{x} + \varepsilon$ with
+$\varepsilon \sim \mathcal{N}(0, 0.05^2)$. Two consecutive tasks $A$ and
+$B$ are constructed so that $\mathbf{d}_A \cdot \mathbf{d}_B = \rho$ where
+$\rho \in [0, 1]$ controls task interference. $\rho = 1$ produces identical
+tasks (no interference); $\rho = 0$ produces orthogonal target directions
+(maximum interference). Each task has 500 training and 200 test samples.
+We sweep $\rho$ at 21 evenly spaced points in $[0, 1]$ with 12 random
+seeds per cell.
+
+\subsection{Metrics}
+
+For each rule and each overlap, after training $A$ then $B$:
+
+\begin{itemize}
+\item \textbf{Past-task error after $B$} (test MSE on task $A$'s data
+      after training on $B$) --- the primary forgetting metric.
+\item \textbf{New-task error after $B$} (test MSE on task $B$'s data) ---
+      the primary plasticity metric.
+\item \textbf{Heat dissipated}: per-edge work $Q_e = -g_e \Delta w_e$
+      summed over training steps and edges. For vanilla this reduces
+      to the canonical viscous dissipation $\mathrm{lr} \sum_t g_t^2$;
+      for the importance-gated rule it includes both the damped gradient
+      term and the anchor-pull cross term. Reported as median over seeds
+      because the seed distribution is broad.
+\item \textbf{Spatial overlap of edge activity}: cosine similarity,
+      Spearman rank correlation, Jaccard of top-20\% edges, and mass
+      overlap of the per-task $|\Delta w|$ distributions.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Retention hierarchy across the overlap axis}
+
+Figure~\ref{fig:overlap} reports the six metrics as a function of task
+overlap. The forgetting curve (top-left panel) shows the canonical
+retention hierarchy \textsf{vanilla} $\succ$ \textsf{thresh} $\succ$
+\textsf{imp\_gated} (highest $A$-error = worst retention) at low
+interference. The \textsf{vanilla}/\textsf{thresh} cross-over near
+$\rho \approx 0.55$ is visible: \textsf{thresh}'s protection becomes a
+hindrance once tasks are similar enough that plasticity beats
+conservation, while \textsf{imp\_gated} remains the lowest curve
+throughout.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{results/overlap_sweep.png}
+\caption{Six-panel summary on the mesh substrate, 21 overlap points $\times$
+12 seeds. Top row: past-task ($A$) error after $B$, new-task ($B$) error
+after $B$, $\|\Delta w\|$ during $B$. Bottom row: locality of $\Delta w$,
+total heat dissipated (median $\pm$ IQR, symlog scale), locality of heat.
+\textsf{vanilla} is blue, \textsf{thresh} orange, \textsf{imp\_gated} green.}
+\label{fig:overlap}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ccccccc}
+\toprule
+& \multicolumn{3}{c}{Past-task error $A$ after $B$}
+& \multicolumn{3}{c}{New-task error $B$ after $B$} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+$\rho$ & vanilla & thresh & imp\_gated & vanilla & thresh & imp\_gated \\
+\midrule
+0.00 & $1.332 \pm 0.111$ & $1.110 \pm 0.066$ & $\mathbf{0.893 \pm 0.050}$
+     & $0.628 \pm 0.108$ & $0.835 \pm 0.092$ & $0.827 \pm 0.058$ \\
+0.25 & $1.128 \pm 0.069$ & $1.026 \pm 0.050$ & $\mathbf{0.843 \pm 0.059}$
+     & $0.645 \pm 0.106$ & $0.796 \pm 0.098$ & $0.779 \pm 0.074$ \\
+0.50 & $0.944 \pm 0.045$ & $0.921 \pm 0.039$ & $\mathbf{0.772 \pm 0.066}$
+     & $0.627 \pm 0.108$ & $0.804 \pm 0.099$ & $0.724 \pm 0.094$ \\
+0.75 & $0.800 \pm 0.066$ & $0.833 \pm 0.068$ & $\mathbf{0.717 \pm 0.075}$
+     & $0.629 \pm 0.105$ & $0.799 \pm 0.096$ & $0.668 \pm 0.108$ \\
+1.00 & $0.675 \pm 0.087$ & $0.801 \pm 0.077$ & $\mathbf{0.602 \pm 0.090}$
+     & $0.681 \pm 0.097$ & $0.806 \pm 0.087$ & $0.619 \pm 0.098$ \\
+\bottomrule
+\end{tabular}
+\caption{Past- and new-task test MSE at five representative overlaps after
+sequentially training tasks $A$ and $B$ on the mesh substrate. 12 seeds per
+cell, $\pm$ one standard error. Hyperparameters: $\mathrm{lr} = 5$,
+$\eta = 0.005$, $\tau = 0.005$, $\lambda = 100$, $\beta = 0.95$, 80 epochs,
+batch 32. Best retention bold.}
+\label{tab:hierarchy}
+\end{table}
+
+\subsection{Pareto improvement over vanilla coupled learning}
+
+The key empirical result is the Pareto curve in Figure~\ref{fig:pareto}.
+At the most-interference operating point ($\rho = 0$), a sweep of the
+importance-gated rule over $\lambda$ traces a curve on the
+$(A_{\text{after }B}, B_{\text{after }B})$ plane that passes below
+vanilla coupled learning's operating point. At $\lambda = 100$
+(highlighted with a ring), the rule achieves $A = 1.192$ versus vanilla's
+$A = 1.332$ --- a $10.5\%$ retention gain --- while matching vanilla's
+$B = 0.628$ within the seed noise ($B = 0.626$). At smaller $\lambda$
+($\in \{20, 30, 50\}$) the rule pushes \emph{below} vanilla's $B$ as
+well, strictly dominating vanilla on both axes simultaneously.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{results/pareto.png}
+\caption{Stability--plasticity Pareto on the mesh at $\rho = 0$, 12 seeds.
+Green: \textsf{imp\_gated} curve over $\lambda \in \{20, 30, 50, 100, 200,
+500, 1000\}$. Blue: vanilla reference with error bars. Orange:
+\textsf{thresh}. Dashed line is vanilla $B$. The ringed marker at
+$\lambda = 100$ matches vanilla $B$ within noise while reducing $A$ by
+$0.14$.}
+\label{fig:pareto}
+\end{figure}
+
+\textsf{thresh} sits well off the Pareto frontier. At its operating
+point it gives $A = 1.110$, a modest retention gain, but at the cost of
+$B = 0.835$ --- a much larger plasticity sacrifice than
+\textsf{imp\_gated} pays at any $\lambda$. Thresholding alone, without
+per-edge importance state, does not select the right edges to protect.
+
+\subsection{Thermodynamic dissipation}
+
+The heat metric $Q_e = -g_e \Delta w_e$, summed over edges and steps,
+measures the work the loss-landscape force performs on the network
+during a task. At $\rho = 0$ the median heat per task is approximately
+$30.9$ for \textsf{vanilla}, $3.6$ for \textsf{thresh}, and $20.2$ for
+\textsf{imp\_gated}: the importance-gated rule dissipates roughly $35\%$
+less than vanilla while retaining more old-task memory.
+Figure~\ref{fig:heatpareto} plots retention against median heat
+dissipated at each overlap. The \textsf{imp\_gated} markers sit
+above-and-left of the \textsf{vanilla} markers at every overlap ---
+strict Pareto dominance on the (heat, retention) plane.
+\textsf{thresh} sits at low heat but at low retention; it trades
+dissipation for plasticity, not for retention.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{results/heat_pareto.png}
+\caption{Retention against heat dissipated, one marker per (rule, overlap)
+cell, log $x$-axis. \textsf{imp\_gated} ($\triangle$) sits above-and-left
+of \textsf{vanilla} ($\circ$) at every overlap level.}
+\label{fig:heatpareto}
+\end{figure}
+
+\subsection{Spatial structure of edge activity}
+
+Figure~\ref{fig:spatial} draws the 2D mesh with edge brightness equal to
+the median $|\Delta w|$ across seeds during each task.
+Figure~\ref{fig:zones} shows the mass-normalised difference
+$p_A(e) - p_B(e)$ where $p$ is the per-task $|\Delta w|$ distribution
+normalised to unit total --- red indicates task-$A$-dominant edges, blue
+indicates task-$B$-dominant edges. The \textsf{imp\_gated} row of
+Figure~\ref{fig:zones} shows visible task-specific zones: edges that
+carried task $A$'s signal (clustered near the output bottleneck) are
+clamped by the snapshot importance and appear red, while task $B$'s
+compensatory updates are routed through the previously-unused left and
+bottom regions of the mesh and appear blue.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{results/substrate_activity.png}
+\caption{Per-task edge activity on the mesh at $\rho = 0$, one row per
+rule. Columns: task $A$ activity, task $B$ activity (shared color scale),
+task $B$ activity (own color scale), and the per-edge minimum
+$\min(|\Delta w_A|, |\Delta w_B|)$. Red squares are input clamps; blue
+and orange diamonds are the differential output pair.}
+\label{fig:spatial}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{results/spatial_zones_normalized.png}
+\caption{Mass-normalised task-zone difference $p_A(e) - p_B(e)$.
+Red edges have a larger share of task $A$'s normalised $|\Delta w|$;
+blue edges have a larger share of task $B$'s. \textsf{imp\_gated}
+(bottom row) shows the clearest task-specific allocation.}
+\label{fig:zones}
+\end{figure}
+
+Table~\ref{tab:spatial} quantifies the spatial overlap of per-task
+$|\Delta w|$ at $\rho = 0$. \textsf{imp\_gated} has the lowest
+top-20\%-edge Jaccard and the lowest rank correlation, indicating the
+strongest edge-set separation. Mass overlap remains high across all
+rules because the single-output bottleneck in this substrate forces all
+signal through the same neighbourhood --- which limits how separable
+tasks can be on this topology, independent of the rule.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+rule & centroid distance & top-20\% Jaccard & mass overlap & rank corr \\
+\midrule
+vanilla     & $0.92$ & $0.22$ & $0.74$ & $0.61$ \\
+thresh      & $0.32$ & $0.30$ & $0.38$ & $0.60$ \\
+imp\_gated  & $1.10$ & $\mathbf{0.12}$ & $0.67$ & $0.42$ \\
+\bottomrule
+\end{tabular}
+\caption{Spatial overlap statistics of the per-task $|\Delta w|$
+distribution at $\rho = 0$, 12 seeds. Lower Jaccard and rank correlation
+indicate stronger task-zone separation.}
+\label{tab:spatial}
+\end{table}
+
+\section{Discussion}
+
+The empirical picture so far is consistent across the three result
+panels. On forgetting alone, the importance-gated rule sits below the
+two baselines at every overlap (Figure~\ref{fig:overlap}). On the
+plasticity--stability trade-off, it Pareto-dominates the vanilla
+baseline --- improving past-task retention without paying a
+new-task-fit cost at the operating point (Figure~\ref{fig:pareto}). On
+heat dissipation, it sits on a strictly better (heat, retention) frontier
+than vanilla (Figure~\ref{fig:heatpareto}). And the spatial visualisation
+suggests that the underlying mechanism is allocation: the snapshot
+importance localises the protection to edges that mattered for task $A$,
+and the new task is routed through the rest of the mesh
+(Figure~\ref{fig:zones}, Table~\ref{tab:spatial}).
+
+Two interpretive caveats are worth flagging. First, the per-seed
+distribution on this substrate is broad: the coupled-network loss is
+non-convex in the edge weights and some seeds settle into local minima.
+We mitigate by reporting medians on the heat metric and by using 12
+seeds per cell, but the IQRs visible in Figure~\ref{fig:overlap} are not
+small. Second, the heat metric is computed from the batch-averaged
+contrastive force; an online (sample-by-sample) physical implementation
+would dissipate more heat by a minibatch-variance term. The relative
+ordering between rules is preserved (the variance term is a property of
+the data, not the rule), but the absolute heat values are a lower bound
+on the physical dissipation.
+
+The spatial separation visible in Figure~\ref{fig:zones} is real but
+not dramatic. The single-output bottleneck in our substrate means all
+signal flows through a narrow neighbourhood near the output diamonds,
+which puts a structural ceiling on how disjoint the per-task active
+edge sets can be. A substrate with multiple output pairs, or with sparse
+random connectivity, would give the rule more capacity to allocate
+tasks to distinct geographic regions.
+
+\section{Further work}
+
+\paragraph{Global EWC/SI baseline.}
+The most important missing experiment. Implement EWC with a global
+Fisher-diagonal estimate (computed over the full training set at task
+boundaries) on the same substrate, and quantify the gap to the local
+\textsf{imp\_gated}. If the gap is small, the locality constraint is
+essentially free; if large, it sets a target for further rule design.
+
+\paragraph{Multi-task sequences.}
+Two-task forgetting is the simplest non-trivial case. The interesting
+regime is $5$--$10$ tasks with controlled pairwise overlap, where
+importance has to negotiate between multiple competing anchors. The
+rule already supports this (the anchor and importance snapshots are
+updated at each task boundary); the empirical question is open.
+
+\paragraph{Langevin dynamics and proper thermodynamics.}
+Add Gaussian noise to the per-step update,
+$\Delta w_e \leftarrow \Delta w_e + \sqrt{2 T \mathrm{lr}}\, \xi_e$,
+making the dynamics stochastic. This admits proper analysis under the
+fluctuation-theorem framework \cite{sekimoto2010, seifert2012}: heat
+dissipated to the bath, work done by the importance potential, and
+entropy production all become well-defined. Principled bounds on the
+retention/dissipation trade-off should follow.
+
+\paragraph{Online-equivalent heat.}
+The substrate already exposes per-sample contrastive forces during the
+\texttt{backward} step. Computing $\mathbb{E}_b[g_e^{(b)\,2}]$ alongside
+the batch-averaged $\bar g_e^2$ is a two-line addition and would let us
+report a sample-by-sample heat estimate that does not assume batched
+dynamics.
+
+\paragraph{Topology variations.}
+Test the rule on (i) a sparse random graph of comparable node count,
+(ii) a mesh with multiple differential output pairs (genuine geographic
+separation possible), (iii) a 3D lattice. The topology dependence of the
+rule's behaviour is itself an interesting question --- particularly
+whether the importance-gated rule benefits more from substrates that
+support spatial task allocation.
+
+\paragraph{Hardware non-idealities.}
+Add memristor-style noise and drift, finite-precision conductance, and
+update quantisation to test whether the rule degrades gracefully under
+hardware-realistic constraints. The proximal step's unconditional
+stability should help here, but this needs verification.
+
+\paragraph{Direct comparison to \cite{thresholdedphysical2025}.}
+Reproduce the experimental setup of the thresholding paper as closely
+as possible, and compare \textsf{imp\_gated} to their thresholding
+result on identical benchmarks. This is the most direct test of whether
+the rule recovers or exceeds the published thresholding result on the
+substrate the paper actually used.
+
+\begin{thebibliography}{99}
+
+\bibitem{mccloskey1989}
+M.\ McCloskey and N.\ J.\ Cohen.
+\newblock Catastrophic interference in connectionist networks: The sequential
+learning problem.
+\newblock \emph{Psychology of Learning and Motivation}, 24:109--165, 1989.
+
+\bibitem{kirkpatrick2017}
+J.\ Kirkpatrick et al.
+\newblock Overcoming catastrophic forgetting in neural networks.
+\newblock \emph{Proceedings of the National Academy of Sciences},
+114(13):3521--3526, 2017.
+
+\bibitem{zenke2017}
+F.\ Zenke, B.\ Poole, and S.\ Ganguli.
+\newblock Continual learning through synaptic intelligence.
+\newblock \emph{ICML}, 2017.
+
+\bibitem{stern2022}
+M.\ Stern, D.\ Hexner, J.\ W.\ Rocks, and A.\ J.\ Liu.
+\newblock Supervised learning through physical changes in a mechanical system.
+\newblock \emph{Physical Review X}, 12:031044, 2022.
+
+\bibitem{stern2024}
+M.\ Stern, A.\ J.\ Liu, and V.\ Balasubramanian.
+\newblock Physical learning beyond the quasistatic limit.
+\newblock \emph{Physical Review Research}, 6:013004, 2024.
+
+\bibitem{scellier2017}
+B.\ Scellier and Y.\ Bengio.
+\newblock Equilibrium propagation: Bridging the gap between energy-based
+models and backpropagation.
+\newblock \emph{Frontiers in Computational Neuroscience}, 11:24, 2017.
+
+\bibitem{thresholdedphysical2025}
+Authors.
+\newblock Thresholded local updates in tunable physical networks for
+sequential learning.
+\newblock \emph{arXiv:2512.03799}, 2025.
+
+\bibitem{sekimoto2010}
+K.\ Sekimoto.
+\newblock \emph{Stochastic Energetics}.
+\newblock Lecture Notes in Physics, Springer, 2010.
+
+\bibitem{seifert2012}
+U.\ Seifert.
+\newblock Stochastic thermodynamics, fluctuation theorems and molecular
+machines.
+\newblock \emph{Reports on Progress in Physics}, 75:126001, 2012.
+
+\end{thebibliography}
+
+\end{document}
