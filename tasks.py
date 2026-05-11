@@ -117,3 +117,53 @@ def make_contextual_orthogonal_task_sequence(input_dim, n_tasks,
         task["context_bank"] = k
         task["base_input_dim"] = input_dim
     return tasks
+
+
+def _context_code(task_idx, n_tasks, context_dim):
+    """Low-dimensional deterministic context code for a task index."""
+    if context_dim <= 0:
+        return np.zeros((0,))
+    theta = 2.0 * np.pi * task_idx / max(n_tasks, 1)
+    features = [np.cos(theta), np.sin(theta)]
+    harmonic = 2
+    while len(features) < context_dim:
+        features.extend([np.cos(harmonic * theta), np.sin(harmonic * theta)])
+        harmonic += 1
+    code = np.array(features[:context_dim], dtype=float)
+    norm = np.linalg.norm(code)
+    if norm > 0:
+        code /= norm
+    return code
+
+
+def make_modulated_context_task_sequence(input_dim, n_tasks, context_dim=3,
+                                         n_train=500, n_test=200,
+                                         noise=0.05, seed=0):
+    """N orthogonal tasks with compact context appended to each sample.
+
+    Unlike input banking, this keeps the sensory dimension fixed. The appended
+    context code is intended for ContextModulatedMeshSubstrate, where it
+    multiplicatively modulates edge conductances rather than acting as an
+    additive linear input.
+    """
+    tasks = make_orthogonal_task_sequence(
+        input_dim=input_dim,
+        n_tasks=n_tasks,
+        n_train=n_train,
+        n_test=n_test,
+        noise=noise,
+        seed=seed,
+    )
+    for k, task in enumerate(tasks):
+        code = _context_code(k, n_tasks, context_dim)
+        train_context = np.repeat(code[None, :], task["X_train"].shape[0], axis=0)
+        test_context = np.repeat(code[None, :], task["X_test"].shape[0], axis=0)
+
+        task["base_X_train"] = task["X_train"]
+        task["base_X_test"] = task["X_test"]
+        task["base_target_dir"] = task["target_dir"]
+        task["X_train"] = np.concatenate([task["X_train"], train_context], axis=1)
+        task["X_test"] = np.concatenate([task["X_test"], test_context], axis=1)
+        task["context_code"] = code
+        task["base_input_dim"] = input_dim
+    return tasks

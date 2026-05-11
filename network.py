@@ -357,3 +357,159 @@ class MeshCoupledSubstrate:
     @property
     def num_params(self):
         return sum(W.size for W in self.weights)
+
+
+class ContextModulatedMeshSubstrate(MeshCoupledSubstrate):
+    """
+    Fixed-size mesh with a low-dimensional context signal that multiplicatively
+    modulates edge conductances.
+
+    Input format is [sensory_x, context_code]. Only sensory_x is clamped onto
+    the left boundary. The context code is treated as a neuromodulatory signal
+    that changes the effective conductance of each edge:
+
+        w_eff,e(c) = w_base,e * exp(gain_e · c)
+
+    The gain fields are fixed random local sensitivities, not trainable
+    parameters. Learning still updates only the base conductances, so all
+    learning rules keep the same per-edge interface. Because w_eff depends
+    multiplicatively on context, the substrate can implement context-dependent
+    input-output slopes without duplicating input banks.
+
+    This is a prototype, not a hardware claim: it tests whether a small
+    modulatory context can make the multi-task regression problem identifiable
+    while keeping one shared output pair and a fixed mesh size.
+    """
+
+    def __init__(self, rows=8, cols=10, n_sensory=8, context_dim=3,
+                 out_pos_row=3, out_neg_row=4, eta=0.05,
+                 init_mean=0.5, init_std=0.05, w_min=0.05,
+                 context_gain_std=0.35, max_log_gain=1.0, seed=0):
+        super().__init__(
+            rows=rows,
+            cols=cols,
+            n_input=n_sensory,
+            out_pos_row=out_pos_row,
+            out_neg_row=out_neg_row,
+            eta=eta,
+            init_mean=init_mean,
+            init_std=init_std,
+            w_min=w_min,
+            seed=seed,
+        )
+        self.n_sensory = n_sensory
+        self.context_dim = context_dim
+        self.context_gain_std = context_gain_std
+        self.max_log_gain = max_log_gain
+
+        rng = np.random.default_rng(seed + 10_000)
+        self.context_gain_h = (
+            context_gain_std
+            * rng.standard_normal((context_dim, rows, cols - 1))
+            / np.sqrt(max(context_dim, 1))
+        )
+        self.context_gain_v = (
+            context_gain_std
+            * rng.standard_normal((context_dim, rows - 1, cols))
+            / np.sqrt(max(context_dim, 1))
+        )
+
+    def _split_input(self, x):
+        expected = self.n_sensory + self.context_dim
+        if x.shape[1] != expected:
+            raise ValueError(
+                f"ContextModulatedMeshSubstrate expected input dimension "
+                f"{expected} = n_sensory({self.n_sensory}) + "
+                f"context_dim({self.context_dim}); got {x.shape[1]}"
+            )
+        x_sensory = x[:, :self.n_sensory]
+        context = x[:, self.n_sensory:]
+        if not np.allclose(context, context[0], atol=1e-12, rtol=1e-12):
+            raise ValueError(
+                "ContextModulatedMeshSubstrate currently expects one context "
+                "code per batch. Train/evaluate one task context at a time."
+            )
+        return x_sensory, context[0]
+
+    def _context_modulators(self, context):
+        log_h = np.tensordot(context, self.context_gain_h, axes=(0, 0))
+        log_v = np.tensordot(context, self.context_gain_v, axes=(0, 0))
+        log_h = np.clip(log_h, -self.max_log_gain, self.max_log_gain)
+        log_v = np.clip(log_v, -self.max_log_gain, self.max_log_gain)
+        return np.exp(log_h), np.exp(log_v)
+
+    def _build_full_laplacian_from_effective(self, W_h_eff, W_v_eff):
+        N = self.n_nodes
+        L = np.zeros((N, N))
+        Wh = np.maximum(W_h_eff, self.w_min)
+        Wv = np.maximum(W_v_eff, self.w_min)
+        for k, (i, j) in enumerate(self.edges_h):
+            r, c = divmod(k, self.cols - 1)
+            w = Wh[r, c]
+            L[i, i] += w; L[j, j] += w
+            L[i, j] -= w; L[j, i] -= w
+        for k, (i, j) in enumerate(self.edges_v):
+            r, c = divmod(k, self.cols)
+            w = Wv[r, c]
+            L[i, i] += w; L[j, j] += w
+            L[i, j] -= w; L[j, i] -= w
+        return L
+
+    def forward(self, x):
+        x_sensory, context = self._split_input(x)
+        mod_h, mod_v = self._context_modulators(context)
+        W_h_eff = np.maximum(self.weights[0], self.w_min) * mod_h
+        W_v_eff = np.maximum(self.weights[1], self.w_min) * mod_v
+
+        L_full = self._build_full_laplacian_from_effective(W_h_eff, W_v_eff)
+        L_ff = L_full[np.ix_(self.free_global, self.free_global)]
+        L_fc = L_full[np.ix_(self.free_global, self.input_global)]
+        v_clamped = x_sensory.T
+        rhs = -L_fc @ v_clamped
+        v_free = np.linalg.solve(L_ff, rhs).T
+        y_pred = (v_free[:, self.out_pos_free]
+                  - v_free[:, self.out_neg_free]).reshape(-1, 1)
+        cache = {
+            "x": x_sensory,
+            "v_free": v_free,
+            "L_ff": L_ff,
+            "L_fc": L_fc,
+            "mod_h": mod_h,
+            "mod_v": mod_v,
+        }
+        return y_pred, cache
+
+    def backward(self, cache, y_pred, y):
+        x = cache["x"]
+        v_free_F = cache["v_free"]
+        L_ff_C = cache["L_ff"].copy()
+        L_ff_C[self.out_pos_free, self.out_pos_free] += self.eta
+        L_ff_C[self.out_neg_free, self.out_neg_free] += self.eta
+        L_ff_C[self.out_pos_free, self.out_neg_free] -= self.eta
+        L_ff_C[self.out_neg_free, self.out_pos_free] -= self.eta
+        rhs_C = -cache["L_fc"] @ x.T
+        rhs_C[self.out_pos_free, :] += self.eta * y.ravel()
+        rhs_C[self.out_neg_free, :] -= self.eta * y.ravel()
+        v_free_C = np.linalg.solve(L_ff_C, rhs_C).T
+
+        v_all_F = self._reconstruct(v_free_F, x)
+        v_all_C = self._reconstruct(v_free_C, x)
+
+        g_W_h_eff = np.zeros_like(self.weights[0])
+        for k, (i, j) in enumerate(self.edges_h):
+            r, c = divmod(k, self.cols - 1)
+            d_F = v_all_F[:, i] - v_all_F[:, j]
+            d_C = v_all_C[:, i] - v_all_C[:, j]
+            g_W_h_eff[r, c] = float(np.mean(d_C ** 2 - d_F ** 2)) / (2.0 * self.eta)
+        g_W_v_eff = np.zeros_like(self.weights[1])
+        for k, (i, j) in enumerate(self.edges_v):
+            r, c = divmod(k, self.cols)
+            d_F = v_all_F[:, i] - v_all_F[:, j]
+            d_C = v_all_C[:, i] - v_all_C[:, j]
+            g_W_v_eff[r, c] = float(np.mean(d_C ** 2 - d_F ** 2)) / (2.0 * self.eta)
+
+        # Chain rule through w_eff = w_base * mod(context).
+        return [
+            g_W_h_eff * cache["mod_h"],
+            g_W_v_eff * cache["mod_v"],
+        ]

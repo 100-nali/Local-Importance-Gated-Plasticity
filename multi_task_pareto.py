@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from network import MeshCoupledSubstrate
-from tasks import make_contextual_orthogonal_task_sequence
+from network import ContextModulatedMeshSubstrate
+from tasks import make_modulated_context_task_sequence
 from learning_rules import (SGDRule, ThresholdedSGDRule,
                             CumulativeImportanceGatedRule,
                             MultiAnchorImportanceGatedRule,
@@ -30,11 +30,13 @@ from experiments import run_sequence
 
 
 CFG = {
-    "base_input_dim": 8,
+    "n_sensory": 8,
+    "context_dim": 3,
     "n_tasks": 5,
-    "n_input": 40,
-    "rows": 40, "cols": 10,
-    "out_pos_row": 19, "out_neg_row": 20,
+    "rows": 8, "cols": 10,
+    "out_pos_row": 3, "out_neg_row": 4,
+    "context_gain_std": 0.35,
+    "max_log_gain": 1.0,
     "n_train": 500, "n_test": 200, "noise": 0.05,
     "n_epochs": 80, "batch_size": 32,
     "n_seeds": 12,
@@ -62,11 +64,15 @@ CFG = {
 
 
 def make_substrate(seed):
-    return MeshCoupledSubstrate(
+    return ContextModulatedMeshSubstrate(
         rows=CFG["rows"], cols=CFG["cols"],
-        n_input=CFG["n_input"],
+        n_sensory=CFG["n_sensory"],
+        context_dim=CFG["context_dim"],
         out_pos_row=CFG["out_pos_row"], out_neg_row=CFG["out_neg_row"],
-        eta=CFG["eta"], seed=seed,
+        eta=CFG["eta"],
+        context_gain_std=CFG["context_gain_std"],
+        max_log_gain=CFG["max_log_gain"],
+        seed=seed,
     )
 
 
@@ -74,8 +80,9 @@ def run_rule(rule_factory):
     """Return arrays of (past_mean_after_last, current_after_last) over seeds."""
     past, curr = [], []
     for seed in range(CFG["n_seeds"]):
-        tasks = make_contextual_orthogonal_task_sequence(
-            input_dim=CFG["base_input_dim"], n_tasks=CFG["n_tasks"],
+        tasks = make_modulated_context_task_sequence(
+            input_dim=CFG["n_sensory"], n_tasks=CFG["n_tasks"],
+            context_dim=CFG["context_dim"],
             n_train=CFG["n_train"], n_test=CFG["n_test"],
             noise=CFG["noise"], seed=seed,
         )
