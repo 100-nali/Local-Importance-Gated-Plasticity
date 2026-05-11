@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 
 from network import MeshCoupledSubstrate
 from tasks import make_orthogonal_task_sequence
-from learning_rules import SGDRule, ThresholdedSGDRule, ImportanceGatedRule
+from learning_rules import (SGDRule, ThresholdedSGDRule,
+                            ImportanceGatedRule, CumulativeImportanceGatedRule)
 from experiments import run_sequence
 
 
@@ -28,12 +29,14 @@ CFG = {
     "n_epochs": 80, "batch_size": 32,
     "n_seeds": 12,
     "lr": 5.0, "eta": 0.005,
-    "lam": 100.0, "beta": 0.95,
+    "lam": 100.0,        # snapshot imp_gated operating point (2-task pareto)
+    "lam_cum": 500.0,    # cumulative imp_gated operating point — crosses no-info floor
+    "beta": 0.95,
     "thresh_tau": 0.005,
 }
 
-RULE_ORDER = ["vanilla", "thresh", "imp_gated"]
-RULE_COLOR = {"vanilla": "C0", "thresh": "C1", "imp_gated": "C2"}
+RULE_ORDER = ["vanilla", "thresh", "imp_gated", "cum_imp_gated"]
+RULE_COLOR = {"vanilla": "C0", "thresh": "C1", "imp_gated": "C2", "cum_imp_gated": "C3"}
 
 
 def make_substrate(seed):
@@ -50,6 +53,7 @@ def make_rules():
         SGDRule(lr=CFG["lr"]),
         ThresholdedSGDRule(lr=CFG["lr"], threshold=CFG["thresh_tau"]),
         ImportanceGatedRule(lr=CFG["lr"], lam=CFG["lam"], beta=CFG["beta"]),
+        CumulativeImportanceGatedRule(lr=CFG["lr"], lam=CFG["lam_cum"], beta=CFG["beta"]),
     ]
 
 
@@ -85,59 +89,70 @@ def plot_multi_task(results, save_path):
     n_tasks = CFG["n_tasks"]
     names = [chr(ord("A") + i) for i in range(n_tasks)]
     stages = np.arange(n_tasks)
+    rules_present = [r for r in RULE_ORDER if r in results]
+    n_rules = len(rules_present)
 
-    fig = plt.figure(figsize=(14, 8.5))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.2, 1.0], hspace=0.40, wspace=0.25)
+    fig = plt.figure(figsize=(16.5, 9.5))
+    gs = fig.add_gridspec(2, n_rules, height_ratios=[1.1, 1.0],
+                          hspace=0.42, wspace=0.30)
 
     # Top row: per-rule forgetting curves (one line per task)
-    axes_top = [fig.add_subplot(gs[0, i]) for i in range(3)]
+    axes_top = [fig.add_subplot(gs[0, i]) for i in range(n_rules)]
     cmap = plt.get_cmap("viridis")
-    for ax, rule in zip(axes_top, RULE_ORDER):
+    y_top_max = 0.0
+    for ax, rule in zip(axes_top, rules_present):
         mats = _stack(results, rule)              # [seeds, stage, task]
         mu = mats.mean(axis=0)
         se = mats.std(axis=0) / np.sqrt(mats.shape[0])
         for j in range(n_tasks):
-            # only plot task j from stage k=j onwards (it has been seen)
             x = stages[j:]; y = mu[j:, j]; e = se[j:, j]
             ax.errorbar(x, y, yerr=e, marker="o", capsize=2,
                         color=cmap(j / max(n_tasks - 1, 1)),
                         label=f"task {names[j]}")
+            y_top_max = max(y_top_max, (y + e).max())
+        ax.axhline(1.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
         ax.set_title(rule, fontsize=11)
         ax.set_xticks(stages)
         ax.set_xticklabels([f"after {n}" for n in names], rotation=0, fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_ylim(bottom=0)
+    for ax in axes_top:
+        ax.set_ylim(0, y_top_max * 1.05)
     axes_top[0].set_ylabel("MSE on task j")
     axes_top[-1].legend(fontsize=8, loc="upper left",
                         bbox_to_anchor=(1.02, 1.0), title="evaluated on")
 
-    # Bottom-left: final MSE per task per rule (end of sequence, stage = n_tasks-1)
-    ax_bar = fig.add_subplot(gs[1, 0])
-    width = 0.27
+    # Bottom row: 3 summary panels split across the available width
+    gs_bot = gs[1, :].subgridspec(1, 3, wspace=0.30)
+
+    # Bottom-left: final MSE per task per rule (end of sequence)
+    ax_bar = fig.add_subplot(gs_bot[0, 0])
+    width = 0.8 / n_rules
+    offsets = (np.arange(n_rules) - (n_rules - 1) / 2.0) * width
     x = np.arange(n_tasks)
-    for i, rule in enumerate(RULE_ORDER):
+    for i, rule in enumerate(rules_present):
         mats = _stack(results, rule)
-        final = mats[:, -1, :]  # [seeds, task] — MSE after final task
+        final = mats[:, -1, :]
         mu = final.mean(axis=0)
         se = final.std(axis=0) / np.sqrt(final.shape[0])
-        ax_bar.bar(x + (i - 1) * width, mu, width, yerr=se, capsize=2,
+        ax_bar.bar(x + offsets[i], mu, width, yerr=se, capsize=1.5,
                    color=RULE_COLOR[rule], label=rule)
+    ax_bar.axhline(1.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
     ax_bar.set_xticks(x)
     ax_bar.set_xticklabels(names)
     ax_bar.set_xlabel("task")
     ax_bar.set_ylabel("MSE after final task")
-    ax_bar.set_title("Final retention (lower = better)", fontsize=10)
-    ax_bar.legend(fontsize=9)
+    ax_bar.set_title("Final retention per task (lower = better)", fontsize=10)
+    ax_bar.legend(fontsize=8, loc="upper right", ncol=2)
     ax_bar.grid(True, alpha=0.3, axis="y")
 
-    # Bottom-middle: average past-task MSE vs stage k (mean over j < k)
-    ax_past = fig.add_subplot(gs[1, 1])
-    for rule in RULE_ORDER:
+    # Bottom-middle: avg past-task MSE vs stage k (mean over j < k)
+    ax_past = fig.add_subplot(gs_bot[0, 1])
+    for rule in rules_present:
         mats = _stack(results, rule)
-        # For stage k >= 1, average mat[k, j] over j = 0..k-1
         past_curve_per_seed = []
         for s in range(mats.shape[0]):
-            row = [np.nan]  # stage 0 has no past tasks
+            row = [np.nan]
             for k in range(1, n_tasks):
                 row.append(mats[s, k, :k].mean())
             past_curve_per_seed.append(row)
@@ -146,17 +161,19 @@ def plot_multi_task(results, save_path):
         se = np.nanstd(past, axis=0) / np.sqrt(past.shape[0])
         ax_past.errorbar(stages, mu, yerr=se, marker="o", capsize=2,
                          color=RULE_COLOR[rule], label=rule)
+    ax_past.axhline(1.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7,
+                    label="no-info floor")
     ax_past.set_xticks(stages)
     ax_past.set_xticklabels([f"after {n}" for n in names], fontsize=8)
     ax_past.set_xlabel("training stage")
     ax_past.set_ylabel("mean MSE on past tasks")
     ax_past.set_title("Past-task retention (avg over j<k)", fontsize=10)
-    ax_past.legend(fontsize=9)
+    ax_past.legend(fontsize=8, loc="best")
     ax_past.grid(True, alpha=0.3)
 
-    # Bottom-right: current-task fit vs stage k (mat[k, k])
-    ax_cur = fig.add_subplot(gs[1, 2])
-    for rule in RULE_ORDER:
+    # Bottom-right: current-task fit vs stage k (diagonal)
+    ax_cur = fig.add_subplot(gs_bot[0, 2])
+    for rule in rules_present:
         mats = _stack(results, rule)
         diag = np.array([np.diag(mats[s]) for s in range(mats.shape[0])])
         mu = diag.mean(axis=0)
@@ -168,13 +185,14 @@ def plot_multi_task(results, save_path):
     ax_cur.set_xlabel("training stage k")
     ax_cur.set_ylabel("MSE on task k")
     ax_cur.set_title("Current-task fit (diagonal)", fontsize=10)
-    ax_cur.legend(fontsize=9)
+    ax_cur.legend(fontsize=8)
     ax_cur.grid(True, alpha=0.3)
 
     fig.suptitle(
         f"Five orthogonal tasks on the mesh substrate "
         f"({CFG['n_seeds']} seeds, lr={CFG['lr']}, "
-        f"λ={CFG['lam']}, τ={CFG['thresh_tau']})",
+        f"imp_gated λ={CFG['lam']:g}, cum_imp_gated λ={CFG['lam_cum']:g}, "
+        f"τ={CFG['thresh_tau']})",
         fontsize=12, y=0.995,
     )
     fig.savefig(save_path, dpi=140, bbox_inches="tight")
@@ -184,15 +202,15 @@ def _summarize(results):
     n_tasks = CFG["n_tasks"]
     print()
     print("Final retention (MSE per task after training all 5):")
-    print(f"  {'rule':<12}" + "".join(f"{chr(ord('A')+j):>9}" for j in range(n_tasks))
+    print(f"  {'rule':<16}" + "".join(f"{chr(ord('A')+j):>9}" for j in range(n_tasks))
           + f"  {'past-mean':>11}  {'current':>9}")
-    for rule in RULE_ORDER:
+    for rule in [r for r in RULE_ORDER if r in results]:
         mats = _stack(results, rule)
         final = mats[:, -1, :].mean(axis=0)
         past_mean = final[:-1].mean()
         current = final[-1]
         row = "".join(f"{v:>9.3f}" for v in final)
-        print(f"  {rule:<12}{row}  {past_mean:>11.3f}  {current:>9.3f}")
+        print(f"  {rule:<16}{row}  {past_mean:>11.3f}  {current:>9.3f}")
 
 
 def main():

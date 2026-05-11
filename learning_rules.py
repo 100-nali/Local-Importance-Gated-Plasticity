@@ -145,3 +145,162 @@ class ImportanceGatedRule:
         return state
 
 
+class CumulativeImportanceGatedRule(ImportanceGatedRule):
+    """
+    Online-EWC variant: anchor importance accumulates across task boundaries
+    instead of being overwritten. Each edge's protection is the sum of its
+    importance over every past task, so an edge important to any past task
+    keeps being damped — not just edges important to the most recent task.
+
+    Identical step rule to ImportanceGatedRule; differs only in on_task_boundary:
+
+        I*_i  <-  I*_i + I_i        (was: I*_i <- I_i)
+
+    Anchor still snaps to the post-task weights each boundary. Cumulative I*
+    grows roughly linearly in number of tasks, so the effective protection
+    strength at fixed lambda is ~N x stronger after N tasks than the snapshot
+    variant — expect the operating-point lambda to shift down accordingly.
+    Still strictly local: every edge holds only its own scalar I*_i.
+    """
+    name = "cum_imp_gated"
+
+    def on_task_boundary(self, network, state):
+        state["anchor"] = [W.copy() for W in network.weights]
+        if state["anchor_importance"] is None:
+            state["anchor_importance"] = [I.copy() for I in state["importance"]]
+        else:
+            for i in range(len(state["anchor_importance"])):
+                state["anchor_importance"][i] = (
+                    state["anchor_importance"][i] + state["importance"][i]
+                )
+        return state
+
+
+class MultiAnchorImportanceGatedRule(ImportanceGatedRule):
+    """
+    Per-task anchors collapsed to two running sums. The anchor loss is
+        L_anchor(w) = sum_k (lam/2) * I*_k * (w - w*_k)^2
+                    = (lam/2) * [S * w^2 - 2 R * w + const]
+    with
+        S_i = sum_k I*_k_i             (cumulative importance)
+        R_i = sum_k I*_k_i * w*_k_i    (importance-weighted sum of anchors)
+
+    Because the loss is quadratic in w, its gradient depends only on S and
+    R. Per-edge memory stays at two scalars regardless of task count — the
+    individual (w*_k, I*_k) pairs do not need to be stored.
+
+    Per-step proximal (implicit) update:
+
+        w_new = (w - lr*g + lr*lam*R) / (1 + lr*lam*S)
+
+    Equivalently: each edge is pulled toward the importance-weighted
+    centroid of all past task solutions, R/S, rather than the most recent
+    endpoint. For orthogonal tasks the centroid is closer to every past
+    solution than the last endpoint is — fixes the single-anchor bias that
+    keeps cum_imp_gated borderline.
+
+    At task boundary:
+        S_i  <-  S_i + I_i
+        R_i  <-  R_i + I_i * w_i
+    where w_i is the post-task weight for the task just finished.
+
+    Strictly local: every edge uses only its own w, g, S, R, I.
+    """
+    name = "multi_anchor"
+
+    def init_state(self, network):
+        return {
+            "S": [np.zeros_like(W) for W in network.weights],
+            "R": [np.zeros_like(W) for W in network.weights],
+            "importance": [np.zeros_like(W) for W in network.weights],
+        }
+
+    def step(self, network, grads, state):
+        S = state["S"]
+        R = state["R"]
+        importance = state["importance"]
+        for i, g in enumerate(grads):
+            importance[i] = self.beta * importance[i] + (1.0 - self.beta) * (g * g)
+            w = network.weights[i]
+            k = self.lr * self.lam * S[i]
+            network.weights[i] = (w - self.lr * g + self.lr * self.lam * R[i]) / (1.0 + k)
+        return state
+
+    def on_task_boundary(self, network, state):
+        for i in range(len(state["S"])):
+            I_curr = state["importance"][i]
+            w_curr = network.weights[i]
+            state["S"][i] = state["S"][i] + I_curr
+            state["R"][i] = state["R"][i] + I_curr * w_curr
+        return state
+
+
+class HeatCumImportanceGatedRule(ImportanceGatedRule):
+    """
+    Online-EWC variant whose importance estimator is the per-task cumulative
+    heat Q_e = -g_e * delta_w_e (Synaptic Intelligence, Zenke et al. 2017).
+
+    Replaces:
+        I_i  <-  beta * I_i + (1 - beta) * g_i^2     (Fisher-diagonal proxy)
+    with:
+        Q_i  <-  Q_i + (-g_i * delta_w_i)             (per-step path integral)
+        at task boundary:
+            I_task_k_i  =  max(Q_i, 0) + eps          (clipped + numerical floor)
+            I*_i        <-  I*_i + I_task_k_i         (online EWC accumulation)
+            Q_i         <-  0                         (reset for next task)
+
+    The same proximal step as ImportanceGatedRule is used (single anchor at
+    most-recent task endpoint, cumulative I*). Only the importance signal
+    changes: Q measures actual loss reduction attributable to each edge —
+    "work done by the contrastive force on this edge during this task" —
+    rather than gradient-magnitude noise. SI typically beats Fisher-diagonal
+    on orthogonal continual-learning sequences because it captures which
+    edges contributed to descent rather than which edges saw large gradients.
+
+    eps prevents zero importance on edges that barely moved (otherwise the
+    proximal denominator is exactly 1 and those edges have no anchor pull).
+
+    Strictly local: every edge uses only its own w, g, Q, I*, w*.
+    """
+    name = "heat_cum_imp_gated"
+
+    def __init__(self, lr=0.05, lam=80.0, eps=1e-3):
+        super().__init__(lr=lr, lam=lam, beta=0.95)  # beta unused
+        self.eps = eps
+
+    def init_state(self, network):
+        return {
+            "anchor": None,
+            "anchor_importance": None,
+            "task_Q": [np.zeros_like(W) for W in network.weights],
+        }
+
+    def step(self, network, grads, state):
+        anchor = state["anchor"]
+        anchor_imp = state["anchor_importance"]
+        for i, g in enumerate(grads):
+            w_before = network.weights[i].copy()
+            if anchor is None or anchor_imp is None:
+                network.weights[i] = w_before - self.lr * g
+            else:
+                k = self.lr * self.lam * anchor_imp[i]
+                network.weights[i] = (w_before - self.lr * g + k * anchor[i]) / (1.0 + k)
+            delta_w = network.weights[i] - w_before
+            state["task_Q"][i] = state["task_Q"][i] + (-g * delta_w)
+        return state
+
+    def on_task_boundary(self, network, state):
+        state["anchor"] = [W.copy() for W in network.weights]
+        I_curr = [np.maximum(Q, 0.0) + self.eps for Q in state["task_Q"]]
+        if state["anchor_importance"] is None:
+            state["anchor_importance"] = [I.copy() for I in I_curr]
+        else:
+            for i in range(len(state["anchor_importance"])):
+                state["anchor_importance"][i] = (
+                    state["anchor_importance"][i] + I_curr[i]
+                )
+        for i in range(len(state["task_Q"])):
+            state["task_Q"][i] = np.zeros_like(state["task_Q"][i])
+        return state
+
+
