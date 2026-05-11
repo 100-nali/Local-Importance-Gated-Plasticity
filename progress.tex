@@ -43,9 +43,17 @@ with controllable task overlap, the importance-gated rule Pareto-dominates
 vanilla on the (past-task error, new-task error) plane: it reduces old-task
 error by approximately $10\%$ while matching vanilla's new-task fit to
 within noise, at the most-interference operating point. It additionally
-dissipates roughly $35\%$ less heat per task. We report the simulator, the
-three rules, the headline results, and a focused plan for the remaining
-experiments.
+dissipates roughly $35\%$ less heat per task. Extending to a
+five-orthogonal-task sequence reveals a Pareto bound: only an
+online-EWC variant (cumulative per-task importance) crosses the
+no-information past-task MSE floor among the four local-scalar
+importance variants we test, and three further variants (centroid
+anchor, Synaptic Intelligence importance, per-task anchors via
+closed-form running sums) all trace the same frontier --- suggesting
+the achievable retention on this substrate is bounded by the
+single-scalar-per-edge structure of the protection signal itself.
+We report the simulator, the rules, the headline results from both
+regimes, and a focused plan for the remaining experiments.
 \end{abstract}
 
 \section{Introduction}
@@ -419,6 +427,174 @@ indicate stronger task-zone separation.}
 \label{tab:spatial}
 \end{table}
 
+\subsection{Five-task orthogonal sequence: a Pareto bound for local-scalar importance}
+\label{sec:multitask}
+
+The two-task results above establish that the proximal importance-gated
+rule retains past-task knowledge while matching vanilla's new-task fit.
+The next question is whether the benefit scales. We construct five
+mutually orthogonal tasks --- the directions $\mathbf{d}_1, \dots,
+\mathbf{d}_5$ are the first five columns of a Haar-random orthonormal
+matrix in $\mathbb{R}^8$ --- and train them sequentially. Orthogonality
+is the maximum-interference regime: each new task's gradient is
+uncorrelated with every past task's, so no inter-task sharing can mask
+poor retention.
+
+\paragraph{The no-information floor.}
+For unit-norm regression targets $y = \mathbf{d}_k \cdot \mathbf{x}$
+with $\mathbf{x} \sim \mathcal{N}(0, I)$, an output of zero yields
+$\mathbb{E}[(0 - y)^2] = \mathbb{E}[y^2] = 1$. A network with
+$\text{MSE} > 1$ on task $k$ is therefore worse than uninformative on
+that task: it has actively learned a different output. We refer to
+$\text{MSE} = 1$ as the \emph{no-information floor} and use it as the
+reference for genuine retention --- a useful sharpening of ``did not
+catastrophically forget,'' which can be satisfied trivially by not
+learning anything.
+
+\paragraph{Snapshot importance fails to scale.}
+At five tasks, all three rules of Section~\ref{sec:methods} stay above
+the no-information floor on past-task MSE
+(Table~\ref{tab:multitask-headline}, top rows). Vanilla coupled
+learning's past-mean MSE is $1.43$ --- it has overwritten past-task
+directions with the most recent. \textsf{thresh} sits near the floor at
+$1.04$, but its current-task MSE is also $0.96$: it is not retaining,
+it is under-learning. \textsf{imp\_gated} at $\lambda = 100$ (the
+operating point from the two-task Pareto) is intermediate: past-mean
+$1.28$, current $0.63$. The structural cause is that the rule's
+snapshot $I^*_e \leftarrow I_e$ overwrites previous-task importance at
+every boundary, so at task 5 each edge only remembers importance
+accumulated during task 4 --- protection against the
+immediately-previous task, not against any earlier ones.
+
+\paragraph{Cumulative (online-EWC) importance crosses the floor.}
+The simplest fix is to accumulate $I^*$ across boundaries rather than
+replace it: $I^*_e \leftarrow I^*_e + I_e$. Per-edge memory stays at a
+single scalar; the proximal step is unchanged. We call the resulting
+rule \textsf{cum\_imp\_gated}. With this one-line change, at
+$\lambda = 500$ the rule achieves past-mean $0.992 \pm 0.013$ and
+current $0.944 \pm 0.043$ over $12$ seeds --- the first point on the
+(past, current) plane that falls below the no-information floor on both
+axes simultaneously (Table~\ref{tab:multitask-headline},
+Figure~\ref{fig:multitaskpareto}). \textbf{\textsf{cum\_imp\_gated} is
+the only rule of the four we tested in this regime that genuinely
+retains past tasks rather than merely interfering with them less.}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+rule & past-mean MSE & current (task $E$) MSE & past $<$ floor? \\
+\midrule
+vanilla                                 & $1.432 \pm 0.109$ & $0.547 \pm 0.093$ & no \\
+\textsf{thresh} ($\tau = 0.005$)        & $1.040 \pm 0.037$ & $0.958 \pm 0.056$ & no \\
+\textsf{imp\_gated} ($\lambda = 100$)   & $1.276 \pm 0.074$ & $0.631 \pm 0.061$ & no \\
+\midrule
+\textsf{cum\_imp\_gated} ($\lambda = 500$)        & $\mathbf{0.992 \pm 0.013}$ & $0.944 \pm 0.043$ & \textbf{yes} \\
+\textsf{multi\_anchor} ($\lambda = 500$)          & $0.993 \pm 0.011$ & $0.950 \pm 0.042$ & yes \\
+\textsf{heat\_cum\_imp\_gated} ($\lambda = 0.1$)  & $0.976 \pm 0.012$ & $0.952 \pm 0.033$ & yes \\
+\bottomrule
+\end{tabular}
+\caption{Final-stage MSE after sequentially training five orthogonal
+tasks on the mesh substrate, $12$ seeds, $80$ epochs per task,
+$\mathrm{lr} = 5$. Past-mean is averaged over the first four tasks;
+current is task $E$ (the most-recently-trained). The horizontal rule
+separates the rules of Section~\ref{sec:methods} (none of which retain
+past tasks below the no-information floor of $\text{MSE} = 1$) from the
+three cumulative variants introduced in this section. Each cumulative
+rule is shown at its best-retention operating point along the $\lambda$
+sweep of Figure~\ref{fig:multitaskpareto}.}
+\label{tab:multitask-headline}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{results/multi_task.png}
+\caption{Five-task forgetting profile for the four rules studied at their
+best-retention operating points. Top row: per-rule MSE on task $j$
+across all five training stages, one line per task (viridis colormap:
+$A$ dark $\to$ $E$ light). Bottom row: final-task MSE per (task, rule);
+average past-task MSE versus training stage; current-task MSE
+(diagonal) versus stage. The dotted gray line marks the no-information
+floor ($\text{MSE} = 1$). \textsf{cum\_imp\_gated} (red) is the only
+trace in the past-task panel that crosses below the floor;
+\textsf{vanilla} and \textsf{imp\_gated} actively interfere
+($\text{MSE} > 1$), while \textsf{thresh} sits at the floor by
+under-learning.}
+\label{fig:multitask}
+\end{figure}
+
+\paragraph{Anchor location and importance estimator do not change the frontier.}
+Two natural strengthenings of \textsf{cum\_imp\_gated} do not move the
+Pareto curve. First, the single anchor at the most-recent
+end-of-task weights is replaced by the importance-weighted centroid of
+all past anchors. The proximal step's closed form requires only two
+running sums per edge,
+\begin{equation}
+\label{eq:SR}
+S_e = \sum_k I^*_{e,k}, \qquad R_e = \sum_k I^*_{e,k} w^*_{e,k},
+\end{equation}
+so per-edge memory stays at two scalars regardless of task count, and
+the update becomes
+\[
+w_e \leftarrow \frac{w_e - \mathrm{lr}\,g_e + \mathrm{lr}\,\lambda\,R_e}
+                    {1 + \mathrm{lr}\,\lambda\,S_e}.
+\]
+We call this rule \textsf{multi\_anchor}: equivalent to maintaining a
+separate quadratic penalty per past task, but with closed-form
+constant-memory bookkeeping. Second, the EMA-of-$g_e^2$ importance
+estimator is replaced by the substrate-native Synaptic Intelligence
+estimator \cite{zenke2017},
+$I_e \leftarrow \sum_t \max\!\big(0,\, -g_{e,t}\,\Delta w_{e,t}\big)$
+--- the cumulative work the contrastive force did on this edge during
+the task, equivalently the heat $Q_e$ we already track end-to-end. SI
+typically outperforms Fisher-diagonal on orthogonal continual
+sequences. Neither change moves the Pareto curve: across $\lambda$
+sweeps with $12$ seeds each, the three cumulative variants produce
+statistically indistinguishable frontiers that saturate at
+$(\text{past}_{\text{best}}, \text{current}_{\text{best}}) \approx
+(0.98,\, 0.95)$. On Figure~\ref{fig:multitaskpareto} the
+\textsf{multi\_anchor} and \textsf{heat\_cum\_imp\_gated} traces sit
+inside the seed-noise envelope of the basic cumulative rule across
+every $\lambda$ value we tested.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{results/multi_task_pareto.png}
+\caption{Five-task stability--plasticity Pareto on the mesh substrate,
+$12$ seeds per point. \textsf{vanilla} (blue square) and
+\textsf{thresh} (orange diamond) are single reference points; four
+imp\_gated variants are shown as $\lambda$ sweeps. The light-green
+region is the genuine retention quadrant (both axes below the
+no-information floor). The three cumulative variants
+(\textsf{cum\_imp\_gated}, \textsf{multi\_anchor},
+\textsf{heat\_cum\_imp\_gated}) overlap within seed-noise across the
+full $\lambda$ range and saturate at the same lower-left corner near
+$(\text{past}, \text{current}) \approx (0.98, 0.95)$. The snapshot
+\textsf{imp\_gated} curve asymptotes to the no-information floor at
+high $\lambda$ without entering the retention region.}
+\label{fig:multitaskpareto}
+\end{figure}
+
+\paragraph{Implication: the bound is structural.}
+Three orthogonal modifications --- anchor location, importance
+accumulation policy, and importance estimator --- do not improve the
+achievable retention. The feature they share is the constraint we have
+imposed throughout: each edge holds a single scalar importance, and the
+anchor pull is isotropic in parameter space. A scalar can record that
+an edge \emph{mattered} for past tasks, but it cannot record
+\emph{which} input-space direction the edge was serving. On
+orthogonal tasks the same edges have to serve different input-space
+directions across tasks; scalar importance cannot disambiguate them,
+so a single operating-point weight is right for at most one task at a
+time. The Pareto bound near $\text{MSE} = 1$ is the empirical signature
+of this constraint. Breaking it appears to require non-scalar per-edge
+state --- for example, a direction-of-importance derived from
+clamped/free voltage differences, which the substrate already exposes
+edge-locally --- at the cost of stepping outside the
+single-scalar-per-edge family that has been our locality criterion so
+far.
+
 \section{Discussion}
 
 The empirical picture so far is consistent across the three result
@@ -463,12 +639,31 @@ boundaries) on the same substrate, and quantify the gap to the local
 \textsf{imp\_gated}. If the gap is small, the locality constraint is
 essentially free; if large, it sets a target for further rule design.
 
-\paragraph{Multi-task sequences.}
-Two-task forgetting is the simplest non-trivial case. The interesting
-regime is $5$--$10$ tasks with controlled pairwise overlap, where
-importance has to negotiate between multiple competing anchors. The
-rule already supports this (the anchor and importance snapshots are
-updated at each task boundary); the empirical question is open.
+\paragraph{Beyond local scalar importance.}
+Section~\ref{sec:multitask} establishes that four variants of
+local-scalar-importance rules --- snapshot vs.\ cumulative,
+single-anchor vs.\ centroid, Fisher-diagonal vs.\ Synaptic-Intelligence
+estimator --- all converge to the same Pareto frontier on a five-task
+orthogonal sequence, saturating at past-task MSE just below the
+no-information floor. The natural next move is non-scalar per-edge
+state. The substrate already exposes the clamped-versus-free voltage
+difference at each edge --- a task-specific local activity signature
+--- so a directional importance, e.g.\ a per-edge tangent vector along
+which the edge ``points'' for the current task, is constructible
+without breaking edge-locality. Two rules to try: (i) a per-edge
+$2$-vector $(I_e^\parallel, I_e^\perp)$ with separate stiffness in the
+past-task direction and orthogonal directions; (ii) replacing scalar
+$I_e$ by a covariance-style estimate built from voltage differences at
+the edge over the course of the task. Whether either breaks the
+$(0.98, 0.95)$ bound is the next open empirical question.
+
+\paragraph{Longer sequences and varied overlap.}
+The five-task experiment used orthogonal directions; the general
+sequential-overlap analogue would sweep an
+$N \times N$ pairwise-overlap matrix at $N = 5, 10$ and ask whether
+the Pareto bound also depends on $N$ or on the spectrum of the
+overlap matrix. If the bound is genuinely set by scalar locality and
+not by $N$, the curves should overlay across $N$.
 
 \paragraph{Langevin dynamics and proper thermodynamics.}
 Add Gaussian noise to the per-step update,

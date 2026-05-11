@@ -6,9 +6,9 @@ Reference lines drawn at MSE = 1.0 — the zero-output baseline — so the
 "genuine retention" region is the bottom-left quadrant (past_mean < 1.0 and
 current < 1.0). vanilla and thresh are reference points.
 
-The question: is there a lambda where imp_gated lands in the retention
-quadrant while strictly beating vanilla on past_mean AND beating thresh on
-current?
+The question: is there a lambda where a cumulative local-importance rule
+lands in the retention quadrant while strictly beating vanilla on past_mean
+AND beating thresh on current?
 
 Run:
     python multi_task_pareto.py
@@ -20,35 +20,43 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from network import MeshCoupledSubstrate
-from tasks import make_orthogonal_task_sequence
+from tasks import make_contextual_orthogonal_task_sequence
 from learning_rules import (SGDRule, ThresholdedSGDRule,
-                            ImportanceGatedRule, CumulativeImportanceGatedRule,
+                            CumulativeImportanceGatedRule,
                             MultiAnchorImportanceGatedRule,
-                            HeatCumImportanceGatedRule)
+                            HeatCumImportanceGatedRule,
+                            SlowConsolidatedImportanceRule)
 from experiments import run_sequence
 
 
 CFG = {
-    "rows": 8, "cols": 10, "n_input": 8,
-    "out_pos_row": 3, "out_neg_row": 4,
+    "base_input_dim": 8,
     "n_tasks": 5,
+    "n_input": 40,
+    "rows": 40, "cols": 10,
+    "out_pos_row": 19, "out_neg_row": 20,
     "n_train": 500, "n_test": 200, "noise": 0.05,
     "n_epochs": 80, "batch_size": 32,
     "n_seeds": 12,
     "lr": 5.0, "eta": 0.005,
     "beta": 0.95,
-    "lambdas": [50, 100, 200, 500, 1000, 2000, 5000],
     # Cumulative I* grows ~N x larger over N tasks, so the protection-equivalent
     # lambda is ~N x smaller; widen the low end to catch the right operating point.
     "lambdas_cum": [5, 10, 20, 50, 100, 200, 500, 1000, 2000],
     # Multi-anchor has the same S accumulation as cum_imp_gated (so denominator
     # scales the same), so we reuse the same lambda grid.
     "lambdas_multi": [5, 10, 20, 50, 100, 200, 500, 1000, 2000],
-    # Heat-based I per task ~ lr * n_steps * E[g^2] >> EMA(g^2) so the
-    # protection-equivalent lambda is ~1e4 smaller. Range probed with a coarse
-    # 3-seed scan; >1 starts to overshoot (current MSE > 1).
-    "lambdas_heat": [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0],
-    "heat_eps": 1e-3,
+    # SI-normalized heat importance can be much larger than raw heat on edges
+    # with small net task displacement, so sweep a wider low-lambda range.
+    "lambdas_heat": [0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3],
+    "heat_xi": 1e-3,
+    "lambdas_slow": [0.1, 0.3, 1, 3, 10],
+    "slow_pull": 0.02,
+    "slow_consolidation_rate": 0.25,
+    "slow_stability_decay": 0.95,
+    "slow_stability_cap": 3.0,
+    "slow_importance_scale": 1.0,
+    "slow_xi": 1e-3,
     "thresh_tau": 0.005,
 }
 
@@ -66,8 +74,8 @@ def run_rule(rule_factory):
     """Return arrays of (past_mean_after_last, current_after_last) over seeds."""
     past, curr = [], []
     for seed in range(CFG["n_seeds"]):
-        tasks = make_orthogonal_task_sequence(
-            input_dim=CFG["n_input"], n_tasks=CFG["n_tasks"],
+        tasks = make_contextual_orthogonal_task_sequence(
+            input_dim=CFG["base_input_dim"], n_tasks=CFG["n_tasks"],
             n_train=CFG["n_train"], n_test=CFG["n_test"],
             noise=CFG["noise"], seed=seed,
         )
@@ -93,7 +101,10 @@ def main():
 
     print(f"Multi-task lambda sweep: {CFG['n_tasks']} orthogonal tasks, "
           f"{CFG['n_seeds']} seeds, lr={CFG['lr']}, beta={CFG['beta']}")
-    print(f"  lambdas = {CFG['lambdas']}")
+    print(f"  lambdas_cum = {CFG['lambdas_cum']}")
+    print(f"  lambdas_multi = {CFG['lambdas_multi']}")
+    print(f"  lambdas_heat = {CFG['lambdas_heat']}  xi={CFG['heat_xi']}")
+    print(f"  lambdas_slow = {CFG['lambdas_slow']}")
     print()
 
     records = {}
@@ -109,16 +120,6 @@ def main():
     records["thresh"] = {"past": p.tolist(), "current": c.tolist()}
     pM, pS = mu_se(p); cM, cS = mu_se(c)
     print(f"  thresh    past_mean = {pM:.3f} +/- {pS:.3f}   current = {cM:.3f} +/- {cS:.3f}")
-
-    records["imp_gated"] = {}
-    print("imp_gated...")
-    for lam in CFG["lambdas"]:
-        p, c = run_rule(lambda lam=lam: ImportanceGatedRule(
-            lr=CFG["lr"], lam=lam, beta=CFG["beta"]))
-        records["imp_gated"][f"lam={lam}"] = {"past": p.tolist(), "current": c.tolist()}
-        pM, pS = mu_se(p); cM, cS = mu_se(c)
-        print(f"  lam={lam:>5}  past_mean = {pM:.3f} +/- {pS:.3f}   "
-              f"current = {cM:.3f} +/- {cS:.3f}")
 
     records["cum_imp_gated"] = {}
     print("cum_imp_gated...")
@@ -144,10 +145,28 @@ def main():
     print("heat_cum_imp_gated...")
     for lam in CFG["lambdas_heat"]:
         p, c = run_rule(lambda lam=lam: HeatCumImportanceGatedRule(
-            lr=CFG["lr"], lam=lam, eps=CFG["heat_eps"]))
+            lr=CFG["lr"], lam=lam, xi=CFG["heat_xi"]))
         records["heat_cum_imp_gated"][f"lam={lam}"] = {"past": p.tolist(), "current": c.tolist()}
         pM, pS = mu_se(p); cM, cS = mu_se(c)
         print(f"  lam={lam:>7.3f}  past_mean = {pM:.3f} +/- {pS:.3f}   "
+              f"current = {cM:.3f} +/- {cS:.3f}")
+
+    records["slow_consolidated"] = {}
+    print("slow_consolidated...")
+    for lam in CFG["lambdas_slow"]:
+        p, c = run_rule(lambda lam=lam: SlowConsolidatedImportanceRule(
+            lr=CFG["lr"],
+            lam=lam,
+            pull=CFG["slow_pull"],
+            consolidation_rate=CFG["slow_consolidation_rate"],
+            stability_decay=CFG["slow_stability_decay"],
+            stability_cap=CFG["slow_stability_cap"],
+            importance_scale=CFG["slow_importance_scale"],
+            xi=CFG["slow_xi"],
+        ))
+        records["slow_consolidated"][f"lam={lam}"] = {"past": p.tolist(), "current": c.tolist()}
+        pM, pS = mu_se(p); cM, cS = mu_se(c)
+        print(f"  lam={lam:>5.1f}  past_mean = {pM:.3f} +/- {pS:.3f}   "
               f"current = {cM:.3f} +/- {cS:.3f}")
 
     with open(out_dir / "multi_task_pareto.json", "w") as f:
@@ -179,7 +198,6 @@ def plot_pareto(records, save_path):
     thr_p, thr_p_se = mu_se(records["thresh"]["past"])
     thr_c, thr_c_se = mu_se(records["thresh"]["current"])
 
-    ig_lams, ig_p, ig_p_se, ig_c, ig_c_se = _curve(records, "imp_gated")
     has_cum = "cum_imp_gated" in records
     if has_cum:
         cum_lams, cum_p, cum_p_se, cum_c, cum_c_se = _curve(records, "cum_imp_gated")
@@ -195,10 +213,15 @@ def plot_pareto(records, save_path):
         ht_lams, ht_p, ht_p_se, ht_c, ht_c_se = _curve(records, "heat_cum_imp_gated")
     else:
         ht_lams = []; ht_p = ht_c = np.array([])
+    has_slow = "slow_consolidated" in records
+    if has_slow:
+        sl_lams, sl_p, sl_p_se, sl_c, sl_c_se = _curve(records, "slow_consolidated")
+    else:
+        sl_lams = []; sl_p = sl_c = np.array([])
 
     # Axis limits
-    x_all = np.concatenate([ig_p, cum_p, ma_p, ht_p, [van_p, thr_p]])
-    y_all = np.concatenate([ig_c, cum_c, ma_c, ht_c, [van_c, thr_c]])
+    x_all = np.concatenate([cum_p, ma_p, ht_p, sl_p, [van_p, thr_p]])
+    y_all = np.concatenate([cum_c, ma_c, ht_c, sl_c, [van_c, thr_c]])
     xpad = 0.1 * (x_all.max() - x_all.min() + 0.1)
     ypad = 0.1 * (y_all.max() - y_all.min() + 0.1)
     xmin, xmax = x_all.min() - xpad, x_all.max() + xpad
@@ -219,18 +242,6 @@ def plot_pareto(records, save_path):
         ax.text(xmin + 0.01 * (xmax - xmin), 1.0 - 0.01 * (ymax - ymin),
                 "true retention region\n(both axes below no-info floor)",
                 fontsize=8, color="green", alpha=0.8, va="top")
-
-    # imp_gated curve
-    order = np.argsort(ig_p)
-    ax.plot(ig_p[order], ig_c[order], "-", color="C2", linewidth=1.6, alpha=0.85, zorder=3)
-    ax.errorbar(ig_p, ig_c, xerr=ig_p_se, yerr=ig_c_se, fmt="o", color="C2",
-                markersize=7, capsize=2, linewidth=0.6,
-                markeredgecolor="black", markeredgewidth=0.4,
-                zorder=4, label="imp_gated (snapshot I*)")
-    for i, lam in enumerate(ig_lams):
-        ax.annotate(f"λ={lam}", (ig_p[i], ig_c[i]), xytext=(7, 4),
-                    textcoords="offset points", fontsize=7, color="C2",
-                    zorder=5)
 
     # cum_imp_gated curve
     if has_cum:
@@ -271,6 +282,20 @@ def plot_pareto(records, save_path):
             ax.annotate(f"λ={lam_str}", (ht_p[i], ht_c[i]), xytext=(-7, 8),
                         textcoords="offset points", fontsize=7, color="C5",
                         ha="right", zorder=5)
+
+    # slow_consolidated curve
+    if has_slow:
+        order = np.argsort(sl_p)
+        ax.plot(sl_p[order], sl_c[order], "-", color="C6", linewidth=1.6, alpha=0.85, zorder=3)
+        ax.errorbar(sl_p, sl_c, xerr=sl_p_se, yerr=sl_c_se, fmt="X", color="C6",
+                    markersize=8, capsize=2, linewidth=0.6,
+                    markeredgecolor="black", markeredgewidth=0.4,
+                    zorder=4, label="slow_consolidated (metaplastic z, S)")
+        for i, lam in enumerate(sl_lams):
+            lam_str = f"{lam:g}"
+            ax.annotate(f"λ={lam_str}", (sl_p[i], sl_c[i]), xytext=(8, 8),
+                        textcoords="offset points", fontsize=7, color="C6",
+                        ha="left", zorder=5)
 
     # Reference points
     ax.errorbar(van_p, van_c, xerr=van_p_se, yerr=van_c_se, fmt="s", color="C0",

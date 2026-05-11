@@ -237,42 +237,44 @@ class MultiAnchorImportanceGatedRule(ImportanceGatedRule):
 
 class HeatCumImportanceGatedRule(ImportanceGatedRule):
     """
-    Online-EWC variant whose importance estimator is the per-task cumulative
-    heat Q_e = -g_e * delta_w_e (Synaptic Intelligence, Zenke et al. 2017).
+    Online-EWC variant whose importance estimator follows Synaptic
+    Intelligence (Zenke et al. 2017) using only edge-local quantities.
 
     Replaces:
         I_i  <-  beta * I_i + (1 - beta) * g_i^2     (Fisher-diagonal proxy)
     with:
         Q_i  <-  Q_i + (-g_i * delta_w_i)             (per-step path integral)
         at task boundary:
-            I_task_k_i  =  max(Q_i, 0) + eps          (clipped + numerical floor)
+            D_i         =  w_i - w_i,start            (net task displacement)
+            I_task_k_i  =  max(Q_i, 0) / (D_i^2 + xi) (SI normalization)
             I*_i        <-  I*_i + I_task_k_i         (online EWC accumulation)
             Q_i         <-  0                         (reset for next task)
+            w_i,start   <-  w_i                       (start next task)
 
     The same proximal step as ImportanceGatedRule is used (single anchor at
     most-recent task endpoint, cumulative I*). Only the importance signal
-    changes: Q measures actual loss reduction attributable to each edge —
-    "work done by the contrastive force on this edge during this task" —
-    rather than gradient-magnitude noise. SI typically beats Fisher-diagonal
-    on orthogonal continual-learning sequences because it captures which
-    edges contributed to descent rather than which edges saw large gradients.
+    changes: Q measures actual loss reduction attributable to each edge,
+    normalized by how far the edge ended up moving over the task. This gives
+    high importance to edges that did useful work despite small net motion,
+    matching SI's "contribution per displacement" structure.
 
-    eps prevents zero importance on edges that barely moved (otherwise the
-    proximal denominator is exactly 1 and those edges have no anchor pull).
+    xi prevents division by zero when an edge has nearly zero net task
+    displacement. Smaller xi makes the SI normalization more aggressive.
 
-    Strictly local: every edge uses only its own w, g, Q, I*, w*.
+    Strictly local: every edge uses only its own w, task-start w, g, Q, I*, w*.
     """
     name = "heat_cum_imp_gated"
 
-    def __init__(self, lr=0.05, lam=80.0, eps=1e-3):
+    def __init__(self, lr=0.05, lam=80.0, xi=1e-3):
         super().__init__(lr=lr, lam=lam, beta=0.95)  # beta unused
-        self.eps = eps
+        self.xi = xi
 
     def init_state(self, network):
         return {
             "anchor": None,
             "anchor_importance": None,
             "task_Q": [np.zeros_like(W) for W in network.weights],
+            "task_start": [W.copy() for W in network.weights],
         }
 
     def step(self, network, grads, state):
@@ -291,7 +293,10 @@ class HeatCumImportanceGatedRule(ImportanceGatedRule):
 
     def on_task_boundary(self, network, state):
         state["anchor"] = [W.copy() for W in network.weights]
-        I_curr = [np.maximum(Q, 0.0) + self.eps for Q in state["task_Q"]]
+        I_curr = []
+        for i, Q in enumerate(state["task_Q"]):
+            delta_task = network.weights[i] - state["task_start"][i]
+            I_curr.append(np.maximum(Q, 0.0) / (delta_task * delta_task + self.xi))
         if state["anchor_importance"] is None:
             state["anchor_importance"] = [I.copy() for I in I_curr]
         else:
@@ -301,6 +306,94 @@ class HeatCumImportanceGatedRule(ImportanceGatedRule):
                 )
         for i in range(len(state["task_Q"])):
             state["task_Q"][i] = np.zeros_like(state["task_Q"][i])
+            state["task_start"][i] = network.weights[i].copy()
+        return state
+
+
+class SlowConsolidatedImportanceRule(ImportanceGatedRule):
+    """
+    Biologically motivated slow-consolidation rule.
+
+    Each edge keeps three local quantities:
+        w_e  = expressed, fast conductance used by the substrate
+        z_e  = slow consolidated conductance
+        S_e  = bounded metaplastic stability / importance
+
+    The fast conductance remains plastic, but high-stability edges learn with
+    a smaller effective step and feel a weak pull toward their consolidated
+    value. At task boundaries, local SI-style work determines how much this
+    task should stabilize the edge, and z_e slowly moves toward the current
+    expressed conductance:
+
+        Q_e       <- sum_t -g_e(t) * delta_w_e(t)
+        I_e       <- max(Q_e, 0) / ((w_e - w_e,start)^2 + xi)
+        tag_e     <- I_e / (I_e + importance_scale)      in [0, 1]
+        S_e       <- min(stability_cap, decay*S_e + tag_e)
+        z_e       <- z_e + consolidation_rate*tag_e*(w_e - z_e)
+
+    Unlike the EWC-like anchor rules, this does not treat the task endpoint as
+    a hard quadratic well. It is closer to synaptic tagging / consolidation:
+    useful local work creates a bounded tag, and durable memory is written
+    gradually into a slow variable while the expressed weight remains able to
+    move for the next task.
+    """
+    name = "slow_consolidated"
+
+    def __init__(self, lr=0.05, lam=1.0, pull=0.02,
+                 consolidation_rate=0.25, stability_decay=0.95,
+                 stability_cap=3.0, importance_scale=1.0, xi=1e-3):
+        super().__init__(lr=lr, lam=lam, beta=0.95)  # beta unused
+        self.pull = pull
+        self.consolidation_rate = consolidation_rate
+        self.stability_decay = stability_decay
+        self.stability_cap = stability_cap
+        self.importance_scale = importance_scale
+        self.xi = xi
+
+    def init_state(self, network):
+        return {
+            "consolidated": [W.copy() for W in network.weights],
+            "stability": [np.zeros_like(W) for W in network.weights],
+            "task_Q": [np.zeros_like(W) for W in network.weights],
+            "task_start": [W.copy() for W in network.weights],
+        }
+
+    def step(self, network, grads, state):
+        z = state["consolidated"]
+        stability = state["stability"]
+        for i, g in enumerate(grads):
+            w_before = network.weights[i].copy()
+            S = stability[i]
+
+            # Stability gates plasticity, but does not fully freeze the edge.
+            gated_lr = self.lr / (1.0 + self.lam * S)
+            w_plastic = w_before - gated_lr * g
+
+            # Weak fast-timescale relaxation toward the slow consolidated state.
+            k = self.lr * self.pull * S
+            network.weights[i] = (w_plastic + k * z[i]) / (1.0 + k)
+
+            delta_w = network.weights[i] - w_before
+            state["task_Q"][i] = state["task_Q"][i] + (-g * delta_w)
+        return state
+
+    def on_task_boundary(self, network, state):
+        for i, Q in enumerate(state["task_Q"]):
+            delta_task = network.weights[i] - state["task_start"][i]
+            I_task = np.maximum(Q, 0.0) / (delta_task * delta_task + self.xi)
+            tag = I_task / (I_task + self.importance_scale)
+
+            state["stability"][i] = np.minimum(
+                self.stability_cap,
+                self.stability_decay * state["stability"][i] + tag,
+            )
+            state["consolidated"][i] = (
+                state["consolidated"][i]
+                + self.consolidation_rate * tag
+                * (network.weights[i] - state["consolidated"][i])
+            )
+            state["task_Q"][i] = np.zeros_like(state["task_Q"][i])
+            state["task_start"][i] = network.weights[i].copy()
         return state
 
 

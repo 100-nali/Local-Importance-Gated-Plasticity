@@ -40,8 +40,9 @@ CONFIG = {
 }
 
 
-def train_on_task(network, rule, state, X, y, n_epochs, batch_size, rng):
-    """Train one task. Returns (final state, cumulative heat per edge).
+def train_on_task(network, rule, state, X, y, n_epochs, batch_size, rng,
+                  step_callback=None):
+    """Train one task. Returns (final state, cumulative heat per edge, steps).
 
     heat_per_edge[i][idx] = sum over training steps of (-g_e * Δw_e). Positive
     when motion is descent along the contrastive force; can be locally negative
@@ -53,6 +54,7 @@ def train_on_task(network, rule, state, X, y, n_epochs, batch_size, rng):
     n = len(X)
     heat = [np.zeros_like(W) for W in network.weights]
     has_project = hasattr(network, "project_weights")
+    step_count = 0
     for _ in range(n_epochs):
         idx = rng.permutation(n)
         for start in range(0, n, batch_size):
@@ -67,19 +69,54 @@ def train_on_task(network, rule, state, X, y, n_epochs, batch_size, rng):
             for i in range(len(network.weights)):
                 delta_w = network.weights[i] - w_before[i]
                 heat[i] += -grads[i] * delta_w
-    return state, heat
+            step_count += 1
+            if step_callback is not None:
+                step_callback(step_count)
+    return state, heat, step_count
 
 
-def run_sequence(rule, tasks, network, n_epochs, batch_size, seed):
+def run_sequence(rule, tasks, network, n_epochs, batch_size, seed,
+                 trace_mse=False, eval_every=None):
     rng = np.random.default_rng(seed)
     state = rule.init_state(network)
     log = {"rule": rule.name, "seed": seed, "tasks": []}
     pre = [mse(network, t["X_test"], t["y_test"]) for t in tasks]
+    if trace_mse:
+        log["learning_curve"] = []
+
+    global_iteration = 0
+
+    def record_mse(task_idx, task_iteration):
+        log["learning_curve"].append({
+            "global_iteration": int(global_iteration + task_iteration),
+            "task_iteration": int(task_iteration),
+            "train_task_idx": int(task_idx),
+            "train_task_name": tasks[task_idx]["name"],
+            "mse_test_each_task": [
+                mse(network, t["X_test"], t["y_test"]) for t in tasks
+            ],
+        })
+
     for k, task in enumerate(tasks):
+        if trace_mse:
+            record_mse(k, 0)
         params_before = network.copy_params()
-        state, heat = train_on_task(network, rule, state,
-                                    task["X_train"], task["y_train"],
-                                    n_epochs, batch_size, rng)
+
+        def maybe_record_mse(task_iteration):
+            if eval_every is None:
+                return
+            if task_iteration % eval_every == 0:
+                record_mse(k, task_iteration)
+
+        state, heat, steps_taken = train_on_task(
+            network, rule, state,
+            task["X_train"], task["y_train"],
+            n_epochs, batch_size, rng,
+            step_callback=maybe_record_mse if trace_mse else None,
+        )
+        if trace_mse and (eval_every is None or steps_taken % eval_every != 0):
+            record_mse(k, steps_taken)
+        global_iteration += steps_taken
         params_after = network.copy_params()
         per_edge_dw = [pa - pb for pb, pa in zip(params_before, params_after)]
         log["tasks"].append({

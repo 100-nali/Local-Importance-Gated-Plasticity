@@ -69,3 +69,51 @@ def make_orthogonal_task_sequence(input_dim, n_tasks,
         t["name"] = chr(ord("A") + k)
         tasks.append(t)
     return tasks
+
+
+def make_contextual_orthogonal_task_sequence(input_dim, n_tasks,
+                                             n_train=500, n_test=200,
+                                             noise=0.05, seed=0):
+    """N orthogonal tasks with task identity encoded in input banks.
+
+    A plain one-hot context appended to x would not be enough for the passive
+    linear mesh: for fixed conductances, the output is linear in all clamped
+    voltages, so y = a.x + b.c cannot express task-dependent slopes. Instead,
+    task k receives its own input bank. For task k, the expanded input is zero
+    everywhere except slice k, which contains x:
+
+        X_ctx[:, k*input_dim:(k+1)*input_dim] = X
+
+    This is equivalent to local features x_i * onehot(task=k). The output pair
+    is still shared, but the task is identifiable and a linear substrate can in
+    principle represent all task maps simultaneously.
+    """
+    tasks = make_orthogonal_task_sequence(
+        input_dim=input_dim,
+        n_tasks=n_tasks,
+        n_train=n_train,
+        n_test=n_test,
+        noise=noise,
+        seed=seed,
+    )
+    contextual_dim = input_dim * n_tasks
+    for k, task in enumerate(tasks):
+        start = k * input_dim
+        end = start + input_dim
+        X_train = np.zeros((task["X_train"].shape[0], contextual_dim))
+        X_test = np.zeros((task["X_test"].shape[0], contextual_dim))
+        X_train[:, start:end] = task["X_train"]
+        X_test[:, start:end] = task["X_test"]
+
+        target_dir = np.zeros((contextual_dim,))
+        target_dir[start:end] = task["target_dir"]
+
+        task["base_X_train"] = task["X_train"]
+        task["base_X_test"] = task["X_test"]
+        task["base_target_dir"] = task["target_dir"]
+        task["X_train"] = X_train
+        task["X_test"] = X_test
+        task["target_dir"] = target_dir
+        task["context_bank"] = k
+        task["base_input_dim"] = input_dim
+    return tasks
