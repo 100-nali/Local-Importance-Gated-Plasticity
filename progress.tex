@@ -1,15 +1,11 @@
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
-\usepackage{amsmath, amssymb, amsthm}
+\usepackage{amsmath, amssymb}
 \usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{booktabs}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 \usepackage{xcolor}
 \usepackage{microtype}
-\usepackage{caption}
-\usepackage{subcaption}
 
 \hypersetup{
     colorlinks=true,
@@ -18,8 +14,8 @@
     urlcolor=blue!60!black,
 }
 
-\title{Local Importance-Gated Plasticity in Edge-Coupled Physical Networks:\\
-       \large A Progress Report}
+\title{Local Importance-Gated Plasticity in Context-Modulated Physical Networks:\\
+       \large Project Introduction and Current Baselines}
 \author{Sonali Goel}
 \date{May 2026}
 
@@ -27,680 +23,324 @@
 \maketitle
 
 \begin{abstract}
-We study catastrophic forgetting in sequential learning on coupled physical
-networks. Software-side mitigations such as Elastic Weight Consolidation
-(EWC) and Synaptic Intelligence (SI) reduce forgetting by computing a
-per-parameter importance signal --- but they do so using global quantities
-that are not available to an edge in a physical learning substrate, where
-each edge can only access the potentials at its own two endpoints. The
-question we ask is whether a \emph{strictly local} importance signal, with
-the same one-scalar-per-edge form, can recover the retention benefits of
-EWC/SI on a coupled physical network. We build a 2D resistor-network mesh
-substrate with contrastive (coupled) learning and test three strictly-local
-rules: vanilla contrastive learning, per-edge gradient thresholding, and a
-proximal importance-gated rule. On a sequential linear regression benchmark
-with controllable task overlap, the importance-gated rule Pareto-dominates
-vanilla on the (past-task error, new-task error) plane: it reduces old-task
-error by approximately $10\%$ while matching vanilla's new-task fit to
-within noise, at the most-interference operating point. It additionally
-dissipates roughly $35\%$ less heat per task. Extending to a
-five-orthogonal-task sequence reveals a Pareto bound: only an
-online-EWC variant (cumulative per-task importance) crosses the
-no-information past-task MSE floor among the four local-scalar
-importance variants we test, and three further variants (centroid
-anchor, Synaptic Intelligence importance, per-task anchors via
-closed-form running sums) all trace the same frontier --- suggesting
-the achievable retention on this substrate is bounded by the
-single-scalar-per-edge structure of the protection signal itself.
-We report the simulator, the rules, the headline results from both
-regimes, and a focused plan for the remaining experiments.
+This project studies continual learning in a physical-learning substrate:
+a passive, edge-coupled resistor-like mesh trained by contrastive local
+updates. The motivating question is whether EWC/SI-style importance
+regularization can be reformulated as a strictly local plasticity rule,
+where each physical edge uses only signals available at that edge. A key
+lesson from the first experiments is that continual learning benchmarks
+must include task identifiability. Five orthogonal regression tasks with
+the same input distribution and the same scalar output are not jointly
+well-posed unless the substrate receives some context signal. The current
+setup therefore uses a fixed-size mesh with trainable context modulation:
+the sensory inputs remain eight-dimensional, the output pair is shared,
+and a compact context code multiplicatively modulates each edge's
+effective conductance. On this corrected benchmark, vanilla contrastive
+learning already learns useful context-conditioned maps, and cumulative
+local importance gives a consistent improvement over vanilla. The best
+cumulative setting reduces mean final MSE from $0.641$ to $0.564$ over
+twelve seeds, and improves both past-task retention and current-task
+fit at the same operating point (a Pareto improvement, not a stability--
+plasticity tradeoff). The evidence so far supports the corrected
+contextual formulation and shows that scalar local importance gives a
+real but bounded retention benefit; the next research step is to design
+richer edge-local importance signals grounded in local activity
+signatures.
 \end{abstract}
 
-\section{Introduction}
+\section{Motivation}
 
-A learning system that trains on a sequence of tasks tends to overwrite the
-parameters that mattered for earlier tasks when it adapts to later ones.
-This is \emph{catastrophic forgetting} \cite{mccloskey1989}, and it is the
-central obstacle to continual learning in any system that re-uses its
-parameters across tasks. The dominant deep-learning mitigations are
-\emph{replay} (revisit data from past tasks) and \emph{importance-weighted
-regularization} (slow down updates on parameters that mattered for past
-tasks). EWC \cite{kirkpatrick2017} and SI \cite{zenke2017} are the canonical
-examples of the latter family.
+Continual learning systems must adapt to new tasks without overwriting
+what was learned before. In artificial neural networks, Elastic Weight
+Consolidation (EWC) \cite{kirkpatrick2017} and Synaptic Intelligence (SI)
+\cite{zenke2017} address this by estimating a per-parameter importance
+and slowing future changes to important parameters. Those algorithms are
+natural in software, where gradients, losses, and task-level bookkeeping
+are globally available.
 
-These methods compute an importance signal \emph{per parameter}, but the
-quantities they use --- the diagonal of the Fisher information matrix, or
-the path integral of the gradient along the training trajectory --- are
-derived from access to the global loss landscape. In a software
-implementation this distinction is invisible; in a physical learning
-substrate it is the central concern. A resistor network or a mechanical
-coupled lattice does not have global access to the loss: each edge can
-only measure quantities at its own two endpoints. Any importance signal
-that hopes to be physically implementable must respect this constraint.
+The physical-learning setting is different. A resistor network or
+mechanical coupled lattice does not have direct access to a global loss
+or global Fisher matrix. Each tunable edge can plausibly access only
+local quantities: its own conductance, the potentials at its endpoints,
+and perhaps local history variables stored at that edge. The central
+question of this project is therefore:
 
-Recent work on physical learning \cite{stern2022, stern2024,
-thresholdedphysical2025} has shown that simple local rules --- coupled
-learning, equilibrium propagation, thresholded force updates --- can
-already produce striking learning behaviour. But sequential learning on
-these substrates still exhibits forgetting, and the literature has not yet
-demonstrated a strictly-local rule that recovers EWC/SI-style retention
-benefits. \textbf{This is the gap this project aims to close}: build a
-strictly-local importance-gated rule, on a physically realisable
-substrate, and test whether it can match the canonical
-importance-regularised retention benefits without using any global
-information.
+\begin{quote}
+Can an EWC/SI-like importance-gated plasticity rule be made strictly
+local and still improve continual learning in an edge-coupled physical
+substrate?
+\end{quote}
 
-The progress reported here covers the simulator, the rule design, and the
-first round of empirical results. The headline finding is that on the
-substrate we use, the proposed rule Pareto-dominates the natural baseline
-(vanilla coupled learning) on the (past-task error, new-task error) plane:
-it improves retention without paying for it in plasticity.
+The project is intentionally small and mechanistic. The goal is not to
+build a high-performance neural network, but to understand what kinds of
+local state and local signals are sufficient for retention in a physical
+learning system.
 
-\section{Background}
+\section{Physical Substrate}
 
-\subsection{Coupled physical networks}
-
-A linear coupled network is an undirected weighted graph in which each
-node has a real-valued potential $v_i$ and each edge $e = (i, j)$
-contributes $\tfrac{1}{2} w_e (v_i - v_j)^2$ to a quadratic energy $E$.
-Some nodes are \emph{clamped} to fixed values (the network's inputs);
-the others equilibrate to the unique minimum of $E$ given those clamps
-(for positive $w_e$). Writing $L$ for the weighted graph Laplacian and
-partitioning into free $f$ and clamped $c$ blocks, the equilibrium
-satisfies
+The base substrate is an $8 \times 10$ mesh of nodes with 4-neighbor
+connectivity. Each edge $e=(i,j)$ has a positive conductance $w_e$, and
+the network energy is
 \[
-L_{ff}\, \mathbf{v}_f = -L_{fc}\, \mathbf{v}_c.
+E(\mathbf{v}) = \frac{1}{2}\sum_e w_e (v_i - v_j)^2.
 \]
-The substrate's forward computation is this linear system solve. With
-positive conductances this corresponds physically to a passive resistor
-network; signed couplings would correspond to a mechanical-spring system
-with both attractive and repulsive springs.
+Input nodes are clamped on the left boundary; all other non-input nodes
+equilibrate. The scalar output is a differential pair on the right
+boundary:
+\[
+\hat{y} = v_{\mathrm{out}+} - v_{\mathrm{out}-}.
+\]
 
-\subsection{Contrastive (coupled) learning}
-
-Coupled learning \cite{stern2022, stern2024} and equilibrium propagation
-\cite{scellier2017} both express the gradient of an output-based loss
-with respect to an edge weight as a local energy difference between two
-equilibria. The \emph{free} phase $\mathbf{v}^F$ uses only the input
-clamps; the \emph{clamped} phase $\mathbf{v}^C$ additionally nudges the
-output toward the target with strength $\eta$. The per-edge gradient is
+Forward computation is the Kirchhoff equilibrium solve
+\[
+L_{ff}\mathbf{v}_f = -L_{fc}\mathbf{v}_c,
+\]
+where $L$ is the weighted graph Laplacian. Learning uses contrastive
+physical learning. A free phase uses only the input clamps; a clamped
+phase additionally nudges the output toward the target with strength
+$\eta$. The edge-local contrastive gradient is
 \begin{equation}
-\label{eq:cl}
-g_e = \frac{1}{2\eta}
+\label{eq:contrastive-gradient}
+g_e =
+\frac{1}{2\eta}
 \left[
 (v^C_i - v^C_j)^2 - (v^F_i - v^F_j)^2
-\right],
+\right].
 \end{equation}
-which approaches $\partial L / \partial w_e$ in the limit $\eta \to 0$.
-Crucially, each edge needs only the potentials at its own two endpoints in
-both phases. There is no chain rule, no backpropagation, no global
-gradient computation.
+This signal is local to edge $e$: it only requires endpoint voltage
+differences in the two phases.
 
-\subsection{Diagonal Fisher information as importance}
+\section{Why Context Is Needed}
 
-EWC's importance proxy is the diagonal of the empirical Fisher information,
-$F_{ii} = \mathbb{E}[(\partial L / \partial w_i)^2]$. The penalty added to
-the loss during a new task is
-$\tfrac{c}{2}\sum_i F_i (w_i - w_i^*)^2$, anchoring each parameter to its
-end-of-previous-task value $w_i^*$ with stiffness proportional to its
-own Fisher entry. The strictly-local analogue we use replaces the Fisher
-diagonal by a per-edge exponential moving average of $g_e^2$ --- a
-quantity each edge can compute from its own gradient history --- and the
-penalty by a proximal (implicit) update toward $w_e^*$ with
-per-edge stiffness $\lambda I_e$. We give the explicit update in
-Section~\ref{sec:methods}.
-
-\section{Methods}
-\label{sec:methods}
-
-\subsection{Substrate: 2D resistor-network mesh}
-
-The substrate is an $8 \times 10$ rectangular grid of nodes with
-4-neighbour (N, S, E, W) connectivity. There are 142 trainable edges
-($\text{rows} \times (\text{cols} - 1) + (\text{rows} - 1) \times \text{cols}$).
-
-\begin{itemize}
-\item Inputs are clamped at the leftmost column, rows $0..7$, to the
-      eight input features $x_0..x_7$.
-\item The output is the differential pair on the rightmost column,
-      $\hat y = v[\text{out}_+] - v[\text{out}_-]$, with rows $3$ and $4$
-      taken as the $\pm$ output nodes.
-\item All other nodes are free.
-\end{itemize}
-
-Conductances are strictly positive ($w_e \geq w_{\min} = 0.05$), making
-this a passive resistor network. The differential output is what allows
-a positive-conductance system to fit signed regression targets without
-resorting to signed couplings.
-
-\subsection{Three local learning rules}
-
-All three rules use only quantities visible at the edge --- the per-edge
-contrastive gradient $g_e$ from Eq.~\ref{eq:cl} plus whatever scalar
-state the rule maintains at that edge.
-
-\paragraph{Vanilla coupled learning.}
-The baseline rule, pure unconstrained contrastive learning:
+An early version of the benchmark used five orthogonal scalar regression
+tasks,
 \[
-w_e \leftarrow w_e - \mathrm{lr} \cdot g_e.
+y_k = \mathbf{d}_k \cdot \mathbf{x},
+\qquad
+\mathbf{x}\sim\mathcal{N}(0,I),
 \]
-No per-edge state, no protection.
+with the same input distribution and the same output pair for every
+task. This formulation is not a valid test of memory unless the task is
+identifiable. The same input $\mathbf{x}$ may require different outputs
+depending on the task, and without context there is no single function
+the substrate can learn that preserves all task maps.
 
-\paragraph{Threshold.}
-The local-force-thresholding rule of \cite{thresholdedphysical2025},
-applied to the per-batch contrastive force:
+The corrected formulation adds task context while keeping the physical
+mesh size fixed. Each sample has an eight-dimensional sensory input and
+a compact context code $\mathbf{c}_k$ identifying the task. The context
+does not simply add to the input-output map; in a linear passive network
+that would only allow terms of the form $a\cdot x + b\cdot c$, which
+cannot express task-dependent slopes. Instead, context modulates the
+effective conductance of each edge:
+\begin{equation}
+\label{eq:context-mod}
+a_e(\mathbf{c}) = \theta_e + \mathbf{u}_e \cdot \mathbf{c},
+\qquad
+w^{\mathrm{eff}}_e(\mathbf{c}) =
+w_{\min} + \exp(\mathrm{clip}(a_e(\mathbf{c}))).
+\end{equation}
+Here $\theta_e$ is a trainable base log-conductance and $\mathbf{u}_e$
+is a trainable local context-sensitivity vector. Both are stored at the
+edge. This gives the substrate trainable, context-dependent routing
+without increasing the number of sensory input nodes or adding separate
+output heads.
+
+\section{Learning Rules}
+
+All rules operate through the same per-edge interface: the substrate
+returns local contrastive gradients for every trainable edge parameter,
+and the rule updates only local state associated with that parameter.
+
+\paragraph{Vanilla contrastive learning.}
+The baseline update is
 \[
-w_e \leftarrow
+p_e \leftarrow p_e - \mathrm{lr}\,g_e,
+\]
+where $p_e$ may be a base log-conductance or a context-sensitivity
+component.
+
+\paragraph{Thresholded learning.}
+The threshold rule updates only when the local force magnitude exceeds
+a fixed threshold:
+\[
+p_e \leftarrow
 \begin{cases}
-w_e - \mathrm{lr} \cdot g_e & \text{if } |g_e| > \tau,\\
-w_e & \text{otherwise.}
+p_e - \mathrm{lr}\,g_e, & |g_e| > \tau,\\
+p_e, & \text{otherwise}.
 \end{cases}
 \]
-The threshold gates plasticity: only edges with above-threshold force
-update. No per-edge state beyond the threshold value $\tau$ itself.
+This is a local sparsification rule but has no task-specific memory.
 
-\paragraph{Importance-gated.}
-Each edge maintains an anchor $w^*_e$ (snapshot of $w_e$ at the previous
-task boundary) and an importance $I^*_e$ (the per-edge $\beta$-EMA of
-$g_e^2$, also snapshotted at the previous task boundary). The update
-during a new task is the proximal (implicit) step
-\begin{equation}
-\label{eq:proximal}
-w_e \leftarrow
-\frac{w_e - \mathrm{lr} \cdot g_e + \mathrm{lr} \cdot \lambda \cdot I^*_e \cdot w^*_e}
-     {1 + \mathrm{lr} \cdot \lambda \cdot I^*_e}.
-\end{equation}
-This is algebraically the implicit Euler step on the augmented loss
-$L + \tfrac{1}{2} \lambda \sum_e I^*_e (w_e - w^*_e)^2$. The denominator
-is always $\geq 1$, so the rule is unconditionally stable regardless of
-how large $\lambda I^*_e$ becomes; aggressive $\lambda$ values do not
-require gradient clipping. The first task uses plain contrastive
-learning (no anchor yet). At each task boundary, $w^*_e \leftarrow w_e$
-and $I^*_e \leftarrow I_e$ (where $I_e$ is the live EMA tracked over the
-just-completed task).
-
-The rule depends only on $w_e, w^*_e, I_e, I^*_e, g_e$ --- all per-edge.
-No global Fisher computation, no cross-edge coupling, no replay buffer.
-
-\subsection{Sequential linear regression with controllable task overlap}
-
-A task is a linear regression with target direction
-$\mathbf{d} \in \mathbb{R}^8$, $|\mathbf{d}| = 1$. Inputs are
-$\mathbf{x} \sim \mathcal{N}(0, I_8)$, targets are
-$y = \mathbf{d} \cdot \mathbf{x} + \varepsilon$ with
-$\varepsilon \sim \mathcal{N}(0, 0.05^2)$. Two consecutive tasks $A$ and
-$B$ are constructed so that $\mathbf{d}_A \cdot \mathbf{d}_B = \rho$ where
-$\rho \in [0, 1]$ controls task interference. $\rho = 1$ produces identical
-tasks (no interference); $\rho = 0$ produces orthogonal target directions
-(maximum interference). Each task has 500 training and 200 test samples.
-We sweep $\rho$ at 21 evenly spaced points in $[0, 1]$ with 12 random
-seeds per cell.
-
-\subsection{Metrics}
-
-For each rule and each overlap, after training $A$ then $B$:
-
-\begin{itemize}
-\item \textbf{Past-task error after $B$} (test MSE on task $A$'s data
-      after training on $B$) --- the primary forgetting metric.
-\item \textbf{New-task error after $B$} (test MSE on task $B$'s data) ---
-      the primary plasticity metric.
-\item \textbf{Heat dissipated}: per-edge work $Q_e = -g_e \Delta w_e$
-      summed over training steps and edges. For vanilla this reduces
-      to the canonical viscous dissipation $\mathrm{lr} \sum_t g_t^2$;
-      for the importance-gated rule it includes both the damped gradient
-      term and the anchor-pull cross term. Reported as median over seeds
-      because the seed distribution is broad.
-\item \textbf{Spatial overlap of edge activity}: cosine similarity,
-      Spearman rank correlation, Jaccard of top-20\% edges, and mass
-      overlap of the per-task $|\Delta w|$ distributions.
-\end{itemize}
-
-\section{Results}
-
-\subsection{Retention hierarchy across the overlap axis}
-
-Figure~\ref{fig:overlap} reports the six metrics as a function of task
-overlap. The forgetting curve (top-left panel) shows the canonical
-retention hierarchy \textsf{vanilla} $\succ$ \textsf{thresh} $\succ$
-\textsf{imp\_gated} (highest $A$-error = worst retention) at low
-interference. The \textsf{vanilla}/\textsf{thresh} cross-over near
-$\rho \approx 0.55$ is visible: \textsf{thresh}'s protection becomes a
-hindrance once tasks are similar enough that plasticity beats
-conservation, while \textsf{imp\_gated} remains the lowest curve
-throughout.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{results/overlap_sweep.png}
-\caption{Six-panel summary on the mesh substrate, 21 overlap points $\times$
-12 seeds. Top row: past-task ($A$) error after $B$, new-task ($B$) error
-after $B$, $\|\Delta w\|$ during $B$. Bottom row: locality of $\Delta w$,
-total heat dissipated (median $\pm$ IQR, symlog scale), locality of heat.
-\textsf{vanilla} is blue, \textsf{thresh} orange, \textsf{imp\_gated} green.}
-\label{fig:overlap}
-\end{figure}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{ccccccc}
-\toprule
-& \multicolumn{3}{c}{Past-task error $A$ after $B$}
-& \multicolumn{3}{c}{New-task error $B$ after $B$} \\
-\cmidrule(lr){2-4} \cmidrule(lr){5-7}
-$\rho$ & vanilla & thresh & imp\_gated & vanilla & thresh & imp\_gated \\
-\midrule
-0.00 & $1.332 \pm 0.111$ & $1.110 \pm 0.066$ & $\mathbf{0.893 \pm 0.050}$
-     & $0.628 \pm 0.108$ & $0.835 \pm 0.092$ & $0.827 \pm 0.058$ \\
-0.25 & $1.128 \pm 0.069$ & $1.026 \pm 0.050$ & $\mathbf{0.843 \pm 0.059}$
-     & $0.645 \pm 0.106$ & $0.796 \pm 0.098$ & $0.779 \pm 0.074$ \\
-0.50 & $0.944 \pm 0.045$ & $0.921 \pm 0.039$ & $\mathbf{0.772 \pm 0.066}$
-     & $0.627 \pm 0.108$ & $0.804 \pm 0.099$ & $0.724 \pm 0.094$ \\
-0.75 & $0.800 \pm 0.066$ & $0.833 \pm 0.068$ & $\mathbf{0.717 \pm 0.075}$
-     & $0.629 \pm 0.105$ & $0.799 \pm 0.096$ & $0.668 \pm 0.108$ \\
-1.00 & $0.675 \pm 0.087$ & $0.801 \pm 0.077$ & $\mathbf{0.602 \pm 0.090}$
-     & $0.681 \pm 0.097$ & $0.806 \pm 0.087$ & $0.619 \pm 0.098$ \\
-\bottomrule
-\end{tabular}
-\caption{Past- and new-task test MSE at five representative overlaps after
-sequentially training tasks $A$ and $B$ on the mesh substrate. 12 seeds per
-cell, $\pm$ one standard error. Hyperparameters: $\mathrm{lr} = 5$,
-$\eta = 0.005$, $\tau = 0.005$, $\lambda = 100$, $\beta = 0.95$, 80 epochs,
-batch 32. Best retention bold.}
-\label{tab:hierarchy}
-\end{table}
-
-\subsection{Pareto improvement over vanilla coupled learning}
-
-The key empirical result is the Pareto curve in Figure~\ref{fig:pareto}.
-At the most-interference operating point ($\rho = 0$), a sweep of the
-importance-gated rule over $\lambda$ traces a curve on the
-$(A_{\text{after }B}, B_{\text{after }B})$ plane that passes below
-vanilla coupled learning's operating point. At $\lambda = 100$
-(highlighted with a ring), the rule achieves $A = 1.192$ versus vanilla's
-$A = 1.332$ --- a $10.5\%$ retention gain --- while matching vanilla's
-$B = 0.628$ within the seed noise ($B = 0.626$). At smaller $\lambda$
-($\in \{20, 30, 50\}$) the rule pushes \emph{below} vanilla's $B$ as
-well, strictly dominating vanilla on both axes simultaneously.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.85\textwidth]{results/pareto.png}
-\caption{Stability--plasticity Pareto on the mesh at $\rho = 0$, 12 seeds.
-Green: \textsf{imp\_gated} curve over $\lambda \in \{20, 30, 50, 100, 200,
-500, 1000\}$. Blue: vanilla reference with error bars. Orange:
-\textsf{thresh}. Dashed line is vanilla $B$. The ringed marker at
-$\lambda = 100$ matches vanilla $B$ within noise while reducing $A$ by
-$0.14$.}
-\label{fig:pareto}
-\end{figure}
-
-\textsf{thresh} sits well off the Pareto frontier. At its operating
-point it gives $A = 1.110$, a modest retention gain, but at the cost of
-$B = 0.835$ --- a much larger plasticity sacrifice than
-\textsf{imp\_gated} pays at any $\lambda$. Thresholding alone, without
-per-edge importance state, does not select the right edges to protect.
-
-\subsection{Thermodynamic dissipation}
-
-The heat metric $Q_e = -g_e \Delta w_e$, summed over edges and steps,
-measures the work the loss-landscape force performs on the network
-during a task. At $\rho = 0$ the median heat per task is approximately
-$30.9$ for \textsf{vanilla}, $3.6$ for \textsf{thresh}, and $20.2$ for
-\textsf{imp\_gated}: the importance-gated rule dissipates roughly $35\%$
-less than vanilla while retaining more old-task memory.
-Figure~\ref{fig:heatpareto} plots retention against median heat
-dissipated at each overlap. The \textsf{imp\_gated} markers sit
-above-and-left of the \textsf{vanilla} markers at every overlap ---
-strict Pareto dominance on the (heat, retention) plane.
-\textsf{thresh} sits at low heat but at low retention; it trades
-dissipation for plasticity, not for retention.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.85\textwidth]{results/heat_pareto.png}
-\caption{Retention against heat dissipated, one marker per (rule, overlap)
-cell, log $x$-axis. \textsf{imp\_gated} ($\triangle$) sits above-and-left
-of \textsf{vanilla} ($\circ$) at every overlap level.}
-\label{fig:heatpareto}
-\end{figure}
-
-\subsection{Spatial structure of edge activity}
-
-Figure~\ref{fig:spatial} draws the 2D mesh with edge brightness equal to
-the median $|\Delta w|$ across seeds during each task.
-Figure~\ref{fig:zones} shows the mass-normalised difference
-$p_A(e) - p_B(e)$ where $p$ is the per-task $|\Delta w|$ distribution
-normalised to unit total --- red indicates task-$A$-dominant edges, blue
-indicates task-$B$-dominant edges. The \textsf{imp\_gated} row of
-Figure~\ref{fig:zones} shows visible task-specific zones: edges that
-carried task $A$'s signal (clustered near the output bottleneck) are
-clamped by the snapshot importance and appear red, while task $B$'s
-compensatory updates are routed through the previously-unused left and
-bottom regions of the mesh and appear blue.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{results/substrate_activity.png}
-\caption{Per-task edge activity on the mesh at $\rho = 0$, one row per
-rule. Columns: task $A$ activity, task $B$ activity (shared color scale),
-task $B$ activity (own color scale), and the per-edge minimum
-$\min(|\Delta w_A|, |\Delta w_B|)$. Red squares are input clamps; blue
-and orange diamonds are the differential output pair.}
-\label{fig:spatial}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.95\textwidth]{results/spatial_zones_normalized.png}
-\caption{Mass-normalised task-zone difference $p_A(e) - p_B(e)$.
-Red edges have a larger share of task $A$'s normalised $|\Delta w|$;
-blue edges have a larger share of task $B$'s. \textsf{imp\_gated}
-(bottom row) shows the clearest task-specific allocation.}
-\label{fig:zones}
-\end{figure}
-
-Table~\ref{tab:spatial} quantifies the spatial overlap of per-task
-$|\Delta w|$ at $\rho = 0$. \textsf{imp\_gated} has the lowest
-top-20\%-edge Jaccard and the lowest rank correlation, indicating the
-strongest edge-set separation. Mass overlap remains high across all
-rules because the single-output bottleneck in this substrate forces all
-signal through the same neighbourhood --- which limits how separable
-tasks can be on this topology, independent of the rule.
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{lcccc}
-\toprule
-rule & centroid distance & top-20\% Jaccard & mass overlap & rank corr \\
-\midrule
-vanilla     & $0.92$ & $0.22$ & $0.74$ & $0.61$ \\
-thresh      & $0.32$ & $0.30$ & $0.38$ & $0.60$ \\
-imp\_gated  & $1.10$ & $\mathbf{0.12}$ & $0.67$ & $0.42$ \\
-\bottomrule
-\end{tabular}
-\caption{Spatial overlap statistics of the per-task $|\Delta w|$
-distribution at $\rho = 0$, 12 seeds. Lower Jaccard and rank correlation
-indicate stronger task-zone separation.}
-\label{tab:spatial}
-\end{table}
-
-\subsection{Five-task orthogonal sequence: a Pareto bound for local-scalar importance}
-\label{sec:multitask}
-
-The two-task results above establish that the proximal importance-gated
-rule retains past-task knowledge while matching vanilla's new-task fit.
-The next question is whether the benefit scales. We construct five
-mutually orthogonal tasks --- the directions $\mathbf{d}_1, \dots,
-\mathbf{d}_5$ are the first five columns of a Haar-random orthonormal
-matrix in $\mathbb{R}^8$ --- and train them sequentially. Orthogonality
-is the maximum-interference regime: each new task's gradient is
-uncorrelated with every past task's, so no inter-task sharing can mask
-poor retention.
-
-\paragraph{The no-information floor.}
-For unit-norm regression targets $y = \mathbf{d}_k \cdot \mathbf{x}$
-with $\mathbf{x} \sim \mathcal{N}(0, I)$, an output of zero yields
-$\mathbb{E}[(0 - y)^2] = \mathbb{E}[y^2] = 1$. A network with
-$\text{MSE} > 1$ on task $k$ is therefore worse than uninformative on
-that task: it has actively learned a different output. We refer to
-$\text{MSE} = 1$ as the \emph{no-information floor} and use it as the
-reference for genuine retention --- a useful sharpening of ``did not
-catastrophically forget,'' which can be satisfied trivially by not
-learning anything.
-
-\paragraph{Snapshot importance fails to scale.}
-At five tasks, all three rules of Section~\ref{sec:methods} stay above
-the no-information floor on past-task MSE
-(Table~\ref{tab:multitask-headline}, top rows). Vanilla coupled
-learning's past-mean MSE is $1.43$ --- it has overwritten past-task
-directions with the most recent. \textsf{thresh} sits near the floor at
-$1.04$, but its current-task MSE is also $0.96$: it is not retaining,
-it is under-learning. \textsf{imp\_gated} at $\lambda = 100$ (the
-operating point from the two-task Pareto) is intermediate: past-mean
-$1.28$, current $0.63$. The structural cause is that the rule's
-snapshot $I^*_e \leftarrow I_e$ overwrites previous-task importance at
-every boundary, so at task 5 each edge only remembers importance
-accumulated during task 4 --- protection against the
-immediately-previous task, not against any earlier ones.
-
-\paragraph{Cumulative (online-EWC) importance crosses the floor.}
-The simplest fix is to accumulate $I^*$ across boundaries rather than
-replace it: $I^*_e \leftarrow I^*_e + I_e$. Per-edge memory stays at a
-single scalar; the proximal step is unchanged. We call the resulting
-rule \textsf{cum\_imp\_gated}. With this one-line change, at
-$\lambda = 500$ the rule achieves past-mean $0.992 \pm 0.013$ and
-current $0.944 \pm 0.043$ over $12$ seeds --- the first point on the
-(past, current) plane that falls below the no-information floor on both
-axes simultaneously (Table~\ref{tab:multitask-headline},
-Figure~\ref{fig:multitaskpareto}). \textbf{\textsf{cum\_imp\_gated} is
-the only rule of the four we tested in this regime that genuinely
-retains past tasks rather than merely interfering with them less.}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{lccc}
-\toprule
-rule & past-mean MSE & current (task $E$) MSE & past $<$ floor? \\
-\midrule
-vanilla                                 & $1.432 \pm 0.109$ & $0.547 \pm 0.093$ & no \\
-\textsf{thresh} ($\tau = 0.005$)        & $1.040 \pm 0.037$ & $0.958 \pm 0.056$ & no \\
-\textsf{imp\_gated} ($\lambda = 100$)   & $1.276 \pm 0.074$ & $0.631 \pm 0.061$ & no \\
-\midrule
-\textsf{cum\_imp\_gated} ($\lambda = 500$)        & $\mathbf{0.992 \pm 0.013}$ & $0.944 \pm 0.043$ & \textbf{yes} \\
-\textsf{multi\_anchor} ($\lambda = 500$)          & $0.993 \pm 0.011$ & $0.950 \pm 0.042$ & yes \\
-\textsf{heat\_cum\_imp\_gated} ($\lambda = 0.1$)  & $0.976 \pm 0.012$ & $0.952 \pm 0.033$ & yes \\
-\bottomrule
-\end{tabular}
-\caption{Final-stage MSE after sequentially training five orthogonal
-tasks on the mesh substrate, $12$ seeds, $80$ epochs per task,
-$\mathrm{lr} = 5$. Past-mean is averaged over the first four tasks;
-current is task $E$ (the most-recently-trained). The horizontal rule
-separates the rules of Section~\ref{sec:methods} (none of which retain
-past tasks below the no-information floor of $\text{MSE} = 1$) from the
-three cumulative variants introduced in this section. Each cumulative
-rule is shown at its best-retention operating point along the $\lambda$
-sweep of Figure~\ref{fig:multitaskpareto}.}
-\label{tab:multitask-headline}
-\end{table}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{results/multi_task.png}
-\caption{Five-task forgetting profile for the four rules studied at their
-best-retention operating points. Top row: per-rule MSE on task $j$
-across all five training stages, one line per task (viridis colormap:
-$A$ dark $\to$ $E$ light). Bottom row: final-task MSE per (task, rule);
-average past-task MSE versus training stage; current-task MSE
-(diagonal) versus stage. The dotted gray line marks the no-information
-floor ($\text{MSE} = 1$). \textsf{cum\_imp\_gated} (red) is the only
-trace in the past-task panel that crosses below the floor;
-\textsf{vanilla} and \textsf{imp\_gated} actively interfere
-($\text{MSE} > 1$), while \textsf{thresh} sits at the floor by
-under-learning.}
-\label{fig:multitask}
-\end{figure}
-
-\paragraph{Anchor location and importance estimator do not change the frontier.}
-Two natural strengthenings of \textsf{cum\_imp\_gated} do not move the
-Pareto curve. First, the single anchor at the most-recent
-end-of-task weights is replaced by the importance-weighted centroid of
-all past anchors. The proximal step's closed form requires only two
-running sums per edge,
-\begin{equation}
-\label{eq:SR}
-S_e = \sum_k I^*_{e,k}, \qquad R_e = \sum_k I^*_{e,k} w^*_{e,k},
-\end{equation}
-so per-edge memory stays at two scalars regardless of task count, and
-the update becomes
+\paragraph{Cumulative importance gating.}
+The most useful importance rule so far is the cumulative EWC-like rule.
+Each parameter tracks an exponential moving average of squared local
+gradient,
 \[
-w_e \leftarrow \frac{w_e - \mathrm{lr}\,g_e + \mathrm{lr}\,\lambda\,R_e}
-                    {1 + \mathrm{lr}\,\lambda\,S_e}.
+I_e \leftarrow \beta I_e + (1-\beta)g_e^2,
 \]
-We call this rule \textsf{multi\_anchor}: equivalent to maintaining a
-separate quadratic penalty per past task, but with closed-form
-constant-memory bookkeeping. Second, the EMA-of-$g_e^2$ importance
-estimator is replaced by the substrate-native Synaptic Intelligence
-estimator \cite{zenke2017},
-$I_e \leftarrow \sum_t \max\!\big(0,\, -g_{e,t}\,\Delta w_{e,t}\big)$
---- the cumulative work the contrastive force did on this edge during
-the task, equivalently the heat $Q_e$ we already track end-to-end. SI
-typically outperforms Fisher-diagonal on orthogonal continual
-sequences. Neither change moves the Pareto curve: across $\lambda$
-sweeps with $12$ seeds each, the three cumulative variants produce
-statistically indistinguishable frontiers that saturate at
-$(\text{past}_{\text{best}}, \text{current}_{\text{best}}) \approx
-(0.98,\, 0.95)$. On Figure~\ref{fig:multitaskpareto} the
-\textsf{multi\_anchor} and \textsf{heat\_cum\_imp\_gated} traces sit
-inside the seed-noise envelope of the basic cumulative rule across
-every $\lambda$ value we tested.
+and accumulates importance across task boundaries,
+\[
+I^*_e \leftarrow I^*_e + I_e.
+\]
+During later tasks the update is a local proximal step toward the most
+recent task-boundary value $p^*_e$:
+\[
+p_e \leftarrow
+\frac{p_e - \mathrm{lr}\,g_e
+      + \mathrm{lr}\,\lambda I^*_e p^*_e}
+     {1 + \mathrm{lr}\,\lambda I^*_e}.
+\]
+This is a scalar local analogue of online EWC. It stores no replay data
+and uses no cross-edge coupling.
+
+\paragraph{Slow consolidation.}
+We also implemented a biologically motivated slow-consolidation rule
+with a fast expressed parameter, a slow consolidated parameter, and a
+bounded stability variable. In the current benchmark this rule is not
+competitive with vanilla or cumulative importance, but it remains a
+useful conceptual reference for biologically plausible metaplasticity.
+
+\section{Current Experiment}
+
+The main current experiment is a five-task contextual regression sequence.
+For each task $k$, targets are
+\[
+y_k = \mathbf{d}_k \cdot \mathbf{x} + \epsilon,
+\]
+where the $\mathbf{d}_k$ are mutually orthogonal unit directions in
+$\mathbb{R}^8$ and $\epsilon$ is small Gaussian noise. The task is made
+identifiable by clamping a context code $\mathbf{c}_k$, which modulates
+edge conductances as in Eq.~\ref{eq:context-mod}. Training is sequential:
+the substrate trains on task $A$, then $B$, and so on through $E$.
+
+Evaluation after the final task reports:
+\begin{itemize}
+\item \textbf{past MSE}: average final test MSE on tasks $A$--$D$,
+\item \textbf{current MSE}: final test MSE on task $E$,
+\item \textbf{overall MSE}: average final test MSE across all tasks.
+\end{itemize}
+All results below use $12$ seeds, $60$ epochs per task, batch size $32$,
+learning rate $20$, and a $5$-dimensional context code.
+
+\section{Current Results}
+
+The corrected contextual setup is learnable. Training each task alone
+with vanilla contrastive learning gives mean single-task MSE
+\[
+\begin{array}{c|ccccc}
+\text{task} & A & B & C & D & E \\
+\hline
+\text{MSE} & 0.560 & 0.710 & 0.520 & 0.426 & 0.427
+\end{array}
+\]
+with overall mean $0.529$. The tasks are not all equally easy for the
+mesh, but they are far below the zero-output baseline of approximately
+$1.0$.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.95\textwidth]{results/multi_task_pareto.png}
-\caption{Five-task stability--plasticity Pareto on the mesh substrate,
-$12$ seeds per point. \textsf{vanilla} (blue square) and
-\textsf{thresh} (orange diamond) are single reference points; four
-imp\_gated variants are shown as $\lambda$ sweeps. The light-green
-region is the genuine retention quadrant (both axes below the
-no-information floor). The three cumulative variants
-(\textsf{cum\_imp\_gated}, \textsf{multi\_anchor},
-\textsf{heat\_cum\_imp\_gated}) overlap within seed-noise across the
-full $\lambda$ range and saturate at the same lower-left corner near
-$(\text{past}, \text{current}) \approx (0.98, 0.95)$. The snapshot
-\textsf{imp\_gated} curve asymptotes to the no-information floor at
-high $\lambda$ without entering the retention region.}
-\label{fig:multitaskpareto}
+\includegraphics[width=\textwidth]{results/context_modulated_baseline_sweep.png}
+\caption{Baseline sweep on the trainable context-modulated mesh. Left:
+past-mean vs current-task MSE after the five-task sequence; the
+cumulative-importance sweep traces a path that sits on the
+Pareto-improving side of vanilla rather than along a
+stability--plasticity trade. Middle: overall final MSE across rules.
+Right: single-task vanilla capacity. Thresholding and slow
+consolidation do not improve this benchmark.}
+\label{fig:context-baseline}
 \end{figure}
 
-\paragraph{Implication: the bound is structural.}
-Three orthogonal modifications --- anchor location, importance
-accumulation policy, and importance estimator --- do not improve the
-achievable retention. The feature they share is the constraint we have
-imposed throughout: each edge holds a single scalar importance, and the
-anchor pull is isotropic in parameter space. A scalar can record that
-an edge \emph{mattered} for past tasks, but it cannot record
-\emph{which} input-space direction the edge was serving. On
-orthogonal tasks the same edges have to serve different input-space
-directions across tasks; scalar importance cannot disambiguate them,
-so a single operating-point weight is right for at most one task at a
-time. The Pareto bound near $\text{MSE} = 1$ is the empirical signature
-of this constraint. Breaking it appears to require non-scalar per-edge
-state --- for example, a direction-of-importance derived from
-clamped/free voltage differences, which the substrate already exposes
-edge-locally --- at the cost of stepping outside the
-single-scalar-per-edge family that has been our locality criterion so
-far.
+The main sequential results are:
+\[
+\begin{array}{lccc}
+\toprule
+\text{rule} & \text{past MSE} & \text{current MSE} & \text{overall MSE}\\
+\midrule
+\text{vanilla} & 0.676 & 0.499 & 0.641\\
+\text{threshold} & 1.043 & 0.931 & 1.020\\
+\text{slow consolidation} & 1.004 & 0.566 & 0.917\\
+\text{cum. importance }(\lambda=5) & 0.649 & 0.499 & 0.619\\
+\text{cum. importance }(\lambda=10) & 0.642 & 0.500 & 0.614\\
+\text{cum. importance }(\lambda=20) & 0.631 & 0.463 & 0.597\\
+\text{cum. importance }(\lambda=50) & 0.600 & 0.460 & 0.572\\
+\text{cum. importance }(\lambda=100) & 0.593 & 0.447 & 0.564\\
+\text{cum. importance }(\lambda=200) & 0.594 & 0.443 & 0.564\\
+\bottomrule
+\end{array}
+\]
 
-\section{Discussion}
+The best cumulative importance setting reduces overall final MSE from
+$0.641$ for vanilla to $0.564$ at $\lambda=100$. In paired differences
+against vanilla, this corresponds to
+\[
+\Delta \text{past} = -0.083 \pm 0.023,\qquad
+\Delta \text{current} = -0.052 \pm 0.042,\qquad
+\Delta \text{overall} = -0.077 \pm 0.020.
+\]
+Both past-task retention and current-task fit improve at the same
+operating point, so cumulative local importance sits on the
+Pareto-improving side rather than on a stability--plasticity tradeoff
+frontier. Relative to the vanilla-to-single-task forgetting budget of
+$0.641 - 0.529 \approx 0.112$, the best cumulative setting recovers
+about $69\%$. The larger qualitative step was still correcting the
+task formulation by making task context identifiable and trainable.
 
-The empirical picture so far is consistent across the three result
-panels. On forgetting alone, the importance-gated rule sits below the
-two baselines at every overlap (Figure~\ref{fig:overlap}). On the
-plasticity--stability trade-off, it Pareto-dominates the vanilla
-baseline --- improving past-task retention without paying a
-new-task-fit cost at the operating point (Figure~\ref{fig:pareto}). On
-heat dissipation, it sits on a strictly better (heat, retention) frontier
-than vanilla (Figure~\ref{fig:heatpareto}). And the spatial visualisation
-suggests that the underlying mechanism is allocation: the snapshot
-importance localises the protection to edges that mattered for task $A$,
-and the new task is routed through the rest of the mesh
-(Figure~\ref{fig:zones}, Table~\ref{tab:spatial}).
+\section{Interpretation}
 
-Two interpretive caveats are worth flagging. First, the per-seed
-distribution on this substrate is broad: the coupled-network loss is
-non-convex in the edge weights and some seeds settle into local minima.
-We mitigate by reporting medians on the heat metric and by using 12
-seeds per cell, but the IQRs visible in Figure~\ref{fig:overlap} are not
-small. Second, the heat metric is computed from the batch-averaged
-contrastive force; an online (sample-by-sample) physical implementation
-would dissipate more heat by a minibatch-variance term. The relative
-ordering between rules is preserved (the variance term is a property of
-the data, not the rule), but the absolute heat values are a lower bound
-on the physical dissipation.
+The current state of the project is best summarized as follows.
 
-The spatial separation visible in Figure~\ref{fig:zones} is real but
-not dramatic. The single-output bottleneck in our substrate means all
-signal flows through a narrow neighbourhood near the output diamonds,
-which puts a structural ceiling on how disjoint the per-task active
-edge sets can be. A substrate with multiple output pairs, or with sparse
-random connectivity, would give the rule more capacity to allocate
-tasks to distinct geographic regions.
+\begin{enumerate}
+\item A passive edge-coupled mesh can be trained by purely local
+contrastive gradients.
+\item Continual learning benchmarks on this substrate require task
+identifiability. Without context, five orthogonal regressions with the
+same input distribution and same output pair are not a well-posed
+memory problem.
+\item A compact trainable context modulation mechanism makes the
+five-task problem learnable without increasing the number of sensory
+input nodes or adding separate output heads.
+\item Scalar cumulative importance gives a Pareto improvement over
+vanilla contrastive learning: at the chosen operating point both
+past-task retention and current-task fit are better than vanilla,
+recovering roughly $69\%$ of the vanilla-to-single-task forgetting
+budget.
+\item Simple thresholding and the current slow-consolidation rule do not
+improve the contextual benchmark.
+\end{enumerate}
 
-\section{Further work}
+This is a useful baseline, but not yet a final local learning rule.
+Scalar squared-gradient importance is a Fisher-diagonal proxy: it
+captures how strongly the loss curvature responds at each edge, but
+not which edges the substrate is actually using to express a stored
+task. Replacing it with importance signals built from local activity
+signatures (free- and clamped-phase endpoint voltages, per-edge energy
+contributions) is the natural next mechanism step.
 
-\paragraph{Global EWC/SI baseline.}
-The most important missing experiment. Implement EWC with a global
-Fisher-diagonal estimate (computed over the full training set at task
-boundaries) on the same substrate, and quantify the gap to the local
-\textsf{imp\_gated}. If the gap is small, the locality constraint is
-essentially free; if large, it sets a target for further rule design.
+\section{Next Steps}
 
-\paragraph{Beyond local scalar importance.}
-Section~\ref{sec:multitask} establishes that four variants of
-local-scalar-importance rules --- snapshot vs.\ cumulative,
-single-anchor vs.\ centroid, Fisher-diagonal vs.\ Synaptic-Intelligence
-estimator --- all converge to the same Pareto frontier on a five-task
-orthogonal sequence, saturating at past-task MSE just below the
-no-information floor. The natural next move is non-scalar per-edge
-state. The substrate already exposes the clamped-versus-free voltage
-difference at each edge --- a task-specific local activity signature
---- so a directional importance, e.g.\ a per-edge tangent vector along
-which the edge ``points'' for the current task, is constructible
-without breaking edge-locality. Two rules to try: (i) a per-edge
-$2$-vector $(I_e^\parallel, I_e^\perp)$ with separate stiffness in the
-past-task direction and orthogonal directions; (ii) replacing scalar
-$I_e$ by a covariance-style estimate built from voltage differences at
-the edge over the course of the task. Whether either breaks the
-$(0.98, 0.95)$ bound is the next open empirical question.
+\paragraph{Use local activity signatures.}
+The next promising direction is to build importance from local activity
+signatures rather than scalar gradient magnitudes alone. Each edge can
+observe voltage drops in the free and clamped phases, the local
+contrastive gradient, and the local context-modulated conductance. These
+quantities define an edge-local signature of how that edge participates
+in a task. A better rule should protect changes that would disrupt a
+stored task signature while leaving compatible changes plastic.
 
-\paragraph{Longer sequences and varied overlap.}
-The five-task experiment used orthogonal directions; the general
-sequential-overlap analogue would sweep an
-$N \times N$ pairwise-overlap matrix at $N = 5, 10$ and ask whether
-the Pareto bound also depends on $N$ or on the spectrum of the
-overlap matrix. If the bound is genuinely set by scalar locality and
-not by $N$, the curves should overlay across $N$.
+\paragraph{Tune and compare against stronger baselines.}
+The cumulative importance sweep should be repeated for longer sequences,
+different context dimensions, and varied task overlap. The most useful
+comparison is not whether a rule beats a zero-output baseline, but
+whether it improves the stability-plasticity frontier over tuned vanilla
+and tuned cumulative importance.
 
-\paragraph{Langevin dynamics and proper thermodynamics.}
-Add Gaussian noise to the per-step update,
-$\Delta w_e \leftarrow \Delta w_e + \sqrt{2 T \mathrm{lr}}\, \xi_e$,
-making the dynamics stochastic. This admits proper analysis under the
-fluctuation-theorem framework \cite{sekimoto2010, seifert2012}: heat
-dissipated to the bath, work done by the importance potential, and
-entropy production all become well-defined. Principled bounds on the
-retention/dissipation trade-off should follow.
-
-\paragraph{Online-equivalent heat.}
-The substrate already exposes per-sample contrastive forces during the
-\texttt{backward} step. Computing $\mathbb{E}_b[g_e^{(b)\,2}]$ alongside
-the batch-averaged $\bar g_e^2$ is a two-line addition and would let us
-report a sample-by-sample heat estimate that does not assume batched
-dynamics.
-
-\paragraph{Topology variations.}
-Test the rule on (i) a sparse random graph of comparable node count,
-(ii) a mesh with multiple differential output pairs (genuine geographic
-separation possible), (iii) a 3D lattice. The topology dependence of the
-rule's behaviour is itself an interesting question --- particularly
-whether the importance-gated rule benefits more from substrates that
-support spatial task allocation.
-
-\paragraph{Hardware non-idealities.}
-Add memristor-style noise and drift, finite-precision conductance, and
-update quantisation to test whether the rule degrades gracefully under
-hardware-realistic constraints. The proximal step's unconditional
-stability should help here, but this needs verification.
-
-\paragraph{Direct comparison to \cite{thresholdedphysical2025}.}
-Reproduce the experimental setup of the thresholding paper as closely
-as possible, and compare \textsf{imp\_gated} to their thresholding
-result on identical benchmarks. This is the most direct test of whether
-the rule recovers or exceeds the published thresholding result on the
-substrate the paper actually used.
+\paragraph{Biological plausibility.}
+The trainable context sensitivity can be interpreted as a local
+neuromodulatory gain: context changes how strongly each edge participates
+in the network, while plasticity remains edge-local. Future rules should
+move toward synaptic-tagging and metaplastic mechanisms: eligibility
+traces, slow consolidation, and local activity-dependent protection,
+rather than exact software-style Fisher penalties.
 
 \begin{thebibliography}{99}
 
@@ -742,17 +382,6 @@ Authors.
 \newblock Thresholded local updates in tunable physical networks for
 sequential learning.
 \newblock \emph{arXiv:2512.03799}, 2025.
-
-\bibitem{sekimoto2010}
-K.\ Sekimoto.
-\newblock \emph{Stochastic Energetics}.
-\newblock Lecture Notes in Physics, Springer, 2010.
-
-\bibitem{seifert2012}
-U.\ Seifert.
-\newblock Stochastic thermodynamics, fluctuation theorems and molecular
-machines.
-\newblock \emph{Reports on Progress in Physics}, 75:126001, 2012.
 
 \end{thebibliography}
 

@@ -1,9 +1,9 @@
 """
-Standalone quick test for the fixed-size context-modulated mesh prototype.
+Standalone quick test for the fixed-size trainable context-modulated mesh.
 
 This does not run the full multi-task experiment. It only asks whether the
-context-modulated substrate can learn a sequence of identifiable orthogonal
-regression tasks with one shared output pair.
+trainable context sensitivities can learn a sequence of identifiable
+orthogonal regression tasks with one shared output pair.
 
 Run:
     python context_modulated_prototype.py
@@ -20,7 +20,7 @@ from learning_rules import (
     SGDRule,
     SlowConsolidatedImportanceRule,
 )
-from network import ContextModulatedMeshSubstrate
+from network import TrainableContextModulatedMeshSubstrate
 from tasks import make_modulated_context_task_sequence
 
 
@@ -28,23 +28,23 @@ CFG = {
     "rows": 8,
     "cols": 10,
     "n_sensory": 8,
-    "context_dim": 3,
+    "context_dim": 5,
     "n_tasks": 5,
     "out_pos_row": 3,
     "out_neg_row": 4,
     "n_train": 500,
     "n_test": 200,
     "noise": 0.05,
-    "n_epochs": 40,
+    "n_epochs": 60,
     "batch_size": 32,
     "curve_eval_every": 16,
     "n_seeds": 3,
-    "lr": 5.0,
+    "lr": 20.0,
     "eta": 0.005,
-    "context_gain_std": 0.35,
-    "max_log_gain": 1.0,
-    "lam_cum": 100.0,
-    "lam_slow": 1.0,
+    "context_init_std": 0.0,
+    "max_log_extra": 4.0,
+    "lam_cum": 50.0,
+    "lam_slow": 0.3,
 }
 
 
@@ -56,7 +56,7 @@ RULE_COLOR = {
 
 
 def make_substrate(seed):
-    return ContextModulatedMeshSubstrate(
+    return TrainableContextModulatedMeshSubstrate(
         rows=CFG["rows"],
         cols=CFG["cols"],
         n_sensory=CFG["n_sensory"],
@@ -64,8 +64,8 @@ def make_substrate(seed):
         out_pos_row=CFG["out_pos_row"],
         out_neg_row=CFG["out_neg_row"],
         eta=CFG["eta"],
-        context_gain_std=CFG["context_gain_std"],
-        max_log_gain=CFG["max_log_gain"],
+        context_init_std=CFG["context_init_std"],
+        max_log_extra=CFG["max_log_extra"],
         seed=seed,
     )
 
@@ -184,7 +184,7 @@ def main():
     print(f"  tasks={CFG['n_tasks']}  seeds={CFG['n_seeds']}  "
           f"epochs/task={CFG['n_epochs']}  lr={CFG['lr']}")
     print(f"  mesh={CFG['rows']}x{CFG['cols']}  sensory={CFG['n_sensory']}  "
-          f"context_dim={CFG['context_dim']}  gain_std={CFG['context_gain_std']}")
+          f"context_dim={CFG['context_dim']}  trainable_context=True")
 
     results = run_all()
     with open(out_dir / "context_modulated_prototype.json", "w") as f:

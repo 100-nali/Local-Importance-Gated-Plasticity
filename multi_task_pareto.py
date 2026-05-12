@@ -31,7 +31,7 @@ from experiments import run_sequence
 
 CFG = {
     "n_sensory": 8,
-    "context_dim": 3,
+    "context_dim": 5,
     "n_tasks": 5,
     "rows": 8, "cols": 10,
     "out_pos_row": 3, "out_neg_row": 4,

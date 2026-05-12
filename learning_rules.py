@@ -43,7 +43,7 @@ class SGDRule:
     def init_state(self, network):
         return {}
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         for i, g in enumerate(grads):
             network.weights[i] -= self.lr * g
         return state
@@ -72,7 +72,7 @@ class ThresholdedSGDRule:
     def init_state(self, network):
         return {}
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         for i, g in enumerate(grads):
             mask = (np.abs(g) > self.threshold).astype(g.dtype)
             network.weights[i] -= self.lr * g * mask
@@ -125,7 +125,7 @@ class ImportanceGatedRule:
             "importance": [np.zeros_like(W) for W in network.weights],
         }
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         anchor = state["anchor"]
         anchor_imp = state["anchor_importance"]
         importance = state["importance"]
@@ -215,7 +215,7 @@ class MultiAnchorImportanceGatedRule(ImportanceGatedRule):
             "importance": [np.zeros_like(W) for W in network.weights],
         }
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         S = state["S"]
         R = state["R"]
         importance = state["importance"]
@@ -277,7 +277,7 @@ class HeatCumImportanceGatedRule(ImportanceGatedRule):
             "task_start": [W.copy() for W in network.weights],
         }
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         anchor = state["anchor"]
         anchor_imp = state["anchor_importance"]
         for i, g in enumerate(grads):
@@ -358,7 +358,7 @@ class SlowConsolidatedImportanceRule(ImportanceGatedRule):
             "task_start": [W.copy() for W in network.weights],
         }
 
-    def step(self, network, grads, state):
+    def step(self, network, grads, state, cache=None):
         z = state["consolidated"]
         stability = state["stability"]
         for i, g in enumerate(grads):
@@ -397,3 +397,55 @@ class SlowConsolidatedImportanceRule(ImportanceGatedRule):
         return state
 
 
+class ActivityCumulativeImportanceRule(CumulativeImportanceGatedRule):
+    """
+    Cumulative online-EWC variant whose importance signal is per-edge
+    free-phase *activity* rather than squared contrastive gradient.
+
+    Activity of an edge in the free phase is the squared endpoint voltage
+    drop in the free-phase equilibrium, averaged across the batch:
+
+        I_e  <-  beta * I_e + (1 - beta) * mean_b (v_i^F - v_j^F)^2
+
+    For parameters indexed by a context axis (per-edge gain components
+    u_e[j]), per-axis importance is the same edge activity scaled by
+    c[j]^2 — the same chain-rule scaling squared-gradient importance
+    picks up implicitly, applied explicitly here.
+
+    Unlike g^2, activity does not decay to zero when a task converges:
+    edges that carry significant voltage drops in the task's equilibrium
+    keep registering as important. The intent is that the anchor pull
+    latches onto "edges the substrate uses to express this task" rather
+    than "edges that were transiently moving during optimization."
+
+    Requires the substrate to provide compute_activity_importance(cache);
+    raises if a forward cache is not supplied or the substrate does not
+    support it.
+
+    Strictly local: every edge uses only its own free-phase endpoint
+    voltages and the broadcast context vector.
+    """
+    name = "act_cum_imp_gated"
+
+    def step(self, network, grads, state, cache=None):
+        if cache is None or not hasattr(network, "compute_activity_importance"):
+            raise RuntimeError(
+                "ActivityCumulativeImportanceRule requires a forward cache "
+                "and a substrate exposing compute_activity_importance()."
+            )
+        activity = network.compute_activity_importance(cache)
+        anchor = state["anchor"]
+        anchor_imp = state["anchor_importance"]
+        importance = state["importance"]
+        for i, g in enumerate(grads):
+            importance[i] = (
+                self.beta * importance[i]
+                + (1.0 - self.beta) * activity[i]
+            )
+            w = network.weights[i]
+            if anchor is None or anchor_imp is None:
+                network.weights[i] = w - self.lr * g
+            else:
+                k = self.lr * self.lam * anchor_imp[i]
+                network.weights[i] = (w - self.lr * g + k * anchor[i]) / (1.0 + k)
+        return state

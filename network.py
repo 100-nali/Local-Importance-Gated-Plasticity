@@ -341,6 +341,34 @@ class MeshCoupledSubstrate:
             v_all[:, gi] = x[:, i]
         return v_all
 
+    def _edge_activity(self, cache):
+        """Per-edge free-phase activity (rows×(cols-1) and (rows-1)×cols
+        arrays of squared endpoint voltage drops, averaged across the
+        batch). Each entry is local to its edge — the equilibrium solve
+        already produced the voltages it needs.
+        """
+        v_all = self._reconstruct(cache["v_free"], cache["x"])
+        act_h = np.zeros((self.rows, self.cols - 1))
+        for k, (i, j) in enumerate(self.edges_h):
+            r, c = divmod(k, self.cols - 1)
+            d = v_all[:, i] - v_all[:, j]
+            act_h[r, c] = float(np.mean(d ** 2))
+        act_v = np.zeros((self.rows - 1, self.cols))
+        for k, (i, j) in enumerate(self.edges_v):
+            r, c = divmod(k, self.cols)
+            d = v_all[:, i] - v_all[:, j]
+            act_v[r, c] = float(np.mean(d ** 2))
+        return act_h, act_v
+
+    def compute_activity_importance(self, cache):
+        """List matching self.weights with per-parameter free-phase
+        activity importance. For this substrate the parameters are
+        just the edge conductances themselves, so the list is the two
+        edge-activity arrays directly.
+        """
+        act_h, act_v = self._edge_activity(cache)
+        return [act_h, act_v]
+
     def project_weights(self):
         """Clip raw weights to physical positive range (call after rule step).
         Uses np.maximum on a fresh array to support rules that reassign the
@@ -513,3 +541,151 @@ class ContextModulatedMeshSubstrate(MeshCoupledSubstrate):
             g_W_h_eff * cache["mod_h"],
             g_W_v_eff * cache["mod_v"],
         ]
+
+
+class TrainableContextModulatedMeshSubstrate(ContextModulatedMeshSubstrate):
+    """
+    Context-modulated mesh with trainable local context sensitivity.
+
+    Each edge has a base log-conductance and a vector of context gains:
+
+        a_e(c)       = theta_e + u_e · c
+        w_eff,e(c)  = w_min + exp(clip(a_e(c)))
+
+    Both theta_e and u_e are trainable edge-local parameters. This is the
+    proper context prototype: the substrate can learn how context changes each
+    edge instead of relying on fixed random modulation. Learning rules still
+    receive a list of local parameter arrays and matching gradients, so vanilla
+    SGD, cumulative importance, and slow consolidation work unchanged.
+    """
+
+    def __init__(self, rows=8, cols=10, n_sensory=8, context_dim=3,
+                 out_pos_row=3, out_neg_row=4, eta=0.05,
+                 init_mean=0.5, init_std=0.05, w_min=0.05,
+                 context_init_std=0.0, max_log_extra=2.0, seed=0):
+        MeshCoupledSubstrate.__init__(
+            self,
+            rows=rows,
+            cols=cols,
+            n_input=n_sensory,
+            out_pos_row=out_pos_row,
+            out_neg_row=out_neg_row,
+            eta=eta,
+            init_mean=init_mean,
+            init_std=init_std,
+            w_min=w_min,
+            seed=seed,
+        )
+        self.n_sensory = n_sensory
+        self.context_dim = context_dim
+        self.context_init_std = context_init_std
+        self.max_log_extra = max_log_extra
+
+        rng = np.random.default_rng(seed + 20_000)
+        base_h = np.log(np.maximum(self.weights[0] - self.w_min, 1e-6))
+        base_v = np.log(np.maximum(self.weights[1] - self.w_min, 1e-6))
+        gain_h = context_init_std * rng.standard_normal(
+            (context_dim, rows, cols - 1)
+        )
+        gain_v = context_init_std * rng.standard_normal(
+            (context_dim, rows - 1, cols)
+        )
+        self.weights = [base_h, base_v, gain_h, gain_v]
+
+    def _effective_from_context(self, context):
+        raw_h = self.weights[0] + np.tensordot(context, self.weights[2], axes=(0, 0))
+        raw_v = self.weights[1] + np.tensordot(context, self.weights[3], axes=(0, 0))
+
+        # Smooth saturation in place of hard clip: bounds the log-conductance
+        # in (-M, M) but keeps the derivative nonzero everywhere, so a
+        # saturated edge still receives gradient and can recover instead of
+        # silently freezing once raw exits the band.
+        M = self.max_log_extra
+        th_h = np.tanh(raw_h / M)
+        th_v = np.tanh(raw_v / M)
+        exp_h = np.exp(M * th_h)
+        exp_v = np.exp(M * th_v)
+        deriv_h = exp_h * (1.0 - th_h ** 2)
+        deriv_v = exp_v * (1.0 - th_v ** 2)
+
+        W_h_eff = self.w_min + exp_h
+        W_v_eff = self.w_min + exp_v
+        return W_h_eff, W_v_eff, deriv_h, deriv_v
+
+    def forward(self, x):
+        x_sensory, context = self._split_input(x)
+        W_h_eff, W_v_eff, deriv_h, deriv_v = self._effective_from_context(context)
+
+        L_full = self._build_full_laplacian_from_effective(W_h_eff, W_v_eff)
+        L_ff = L_full[np.ix_(self.free_global, self.free_global)]
+        L_fc = L_full[np.ix_(self.free_global, self.input_global)]
+        v_clamped = x_sensory.T
+        rhs = -L_fc @ v_clamped
+        v_free = np.linalg.solve(L_ff, rhs).T
+        y_pred = (v_free[:, self.out_pos_free]
+                  - v_free[:, self.out_neg_free]).reshape(-1, 1)
+        cache = {
+            "x": x_sensory,
+            "context": context,
+            "v_free": v_free,
+            "L_ff": L_ff,
+            "L_fc": L_fc,
+            "deriv_h": deriv_h,
+            "deriv_v": deriv_v,
+        }
+        return y_pred, cache
+
+    def backward(self, cache, y_pred, y):
+        x = cache["x"]
+        v_free_F = cache["v_free"]
+        L_ff_C = cache["L_ff"].copy()
+        L_ff_C[self.out_pos_free, self.out_pos_free] += self.eta
+        L_ff_C[self.out_neg_free, self.out_neg_free] += self.eta
+        L_ff_C[self.out_pos_free, self.out_neg_free] -= self.eta
+        L_ff_C[self.out_neg_free, self.out_pos_free] -= self.eta
+        rhs_C = -cache["L_fc"] @ x.T
+        rhs_C[self.out_pos_free, :] += self.eta * y.ravel()
+        rhs_C[self.out_neg_free, :] -= self.eta * y.ravel()
+        v_free_C = np.linalg.solve(L_ff_C, rhs_C).T
+
+        v_all_F = self._reconstruct(v_free_F, x)
+        v_all_C = self._reconstruct(v_free_C, x)
+
+        g_W_h_eff = np.zeros_like(self.weights[0])
+        for k, (i, j) in enumerate(self.edges_h):
+            r, c = divmod(k, self.cols - 1)
+            d_F = v_all_F[:, i] - v_all_F[:, j]
+            d_C = v_all_C[:, i] - v_all_C[:, j]
+            g_W_h_eff[r, c] = float(np.mean(d_C ** 2 - d_F ** 2)) / (2.0 * self.eta)
+        g_W_v_eff = np.zeros_like(self.weights[1])
+        for k, (i, j) in enumerate(self.edges_v):
+            r, c = divmod(k, self.cols)
+            d_F = v_all_F[:, i] - v_all_F[:, j]
+            d_C = v_all_C[:, i] - v_all_C[:, j]
+            g_W_v_eff[r, c] = float(np.mean(d_C ** 2 - d_F ** 2)) / (2.0 * self.eta)
+
+        g_log_h = g_W_h_eff * cache["deriv_h"]
+        g_log_v = g_W_v_eff * cache["deriv_v"]
+        context = cache["context"]
+        return [
+            g_log_h,
+            g_log_v,
+            context[:, None, None] * g_log_h[None, :, :],
+            context[:, None, None] * g_log_v[None, :, :],
+        ]
+
+    def compute_activity_importance(self, cache):
+        """Free-phase per-edge activity, with per-axis copies for the
+        context-sensitivity parameters scaled by c[j]^2 — the same
+        chain-rule scaling that g^2 importance picks up implicitly.
+        """
+        act_h, act_v = self._edge_activity(cache)
+        context = cache["context"]
+        c2 = context ** 2
+        act_u_h = c2[:, None, None] * act_h[None, :, :]
+        act_u_v = c2[:, None, None] * act_v[None, :, :]
+        return [act_h, act_v, act_u_h, act_u_v]
+
+    def project_weights(self):
+        # Effective conductances are positive by construction.
+        return None

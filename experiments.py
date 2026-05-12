@@ -63,7 +63,7 @@ def train_on_task(network, rule, state, X, y, n_epochs, batch_size, rng,
             y_pred, cache = network.forward(xb)
             grads = network.backward(cache, y_pred, yb)
             w_before = [W.copy() for W in network.weights]
-            state = rule.step(network, grads, state)
+            state = rule.step(network, grads, state, cache=cache)
             if has_project:
                 network.project_weights()
             for i in range(len(network.weights)):

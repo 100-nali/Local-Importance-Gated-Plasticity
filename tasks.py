@@ -120,19 +120,30 @@ def make_contextual_orthogonal_task_sequence(input_dim, n_tasks,
 
 
 def _context_code(task_idx, n_tasks, context_dim):
-    """Low-dimensional deterministic context code for a task index."""
+    """Simplex context codes: N unit vectors with pairwise inner product
+    -1/(N-1) for every distinct pair.
+
+    Uniform overlap across all task pairs through the shared u_e channel,
+    so no two tasks are structurally more or less protected than any other.
+    Requires context_dim >= n_tasks: the simplex has N vertices in an
+    (N-1)-dim subspace, embedded in the first n_tasks coordinates.
+    """
     if context_dim <= 0:
         return np.zeros((0,))
-    theta = 2.0 * np.pi * task_idx / max(n_tasks, 1)
-    features = [np.cos(theta), np.sin(theta)]
-    harmonic = 2
-    while len(features) < context_dim:
-        features.extend([np.cos(harmonic * theta), np.sin(harmonic * theta)])
-        harmonic += 1
-    code = np.array(features[:context_dim], dtype=float)
-    norm = np.linalg.norm(code)
-    if norm > 0:
-        code /= norm
+    if n_tasks <= 1:
+        code = np.zeros((context_dim,))
+        code[0] = 1.0
+        return code
+    if context_dim < n_tasks:
+        raise ValueError(
+            f"_context_code requires context_dim ({context_dim}) >= "
+            f"n_tasks ({n_tasks}); bump context_dim to use simplex codes."
+        )
+    code = np.zeros((context_dim,))
+    scale = np.sqrt(n_tasks / (n_tasks - 1.0))
+    code[:n_tasks] = scale * (
+        (np.arange(n_tasks) == task_idx).astype(float) - 1.0 / n_tasks
+    )
     return code
 
 
