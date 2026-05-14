@@ -47,7 +47,9 @@ CFG = {
     "eta": 0.005,
     "context_init_std": 0.0,
     "max_log_extra": 4.0,
-    "thresh_tau": 0.005,
+    # Gradients in the trainable log/context parameterization are much smaller
+    # than raw conductance gradients in the original mesh experiments.
+    "thresh_tau": 1e-4,
     "lambdas_cum": [5, 10, 20, 50, 100, 200],
     "lam_slow": 0.3,
     # Activity importance is on the same scale as squared voltage drops

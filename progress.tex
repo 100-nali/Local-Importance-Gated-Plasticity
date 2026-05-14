@@ -36,16 +36,15 @@ setup therefore uses a fixed-size mesh with trainable context modulation:
 the sensory inputs remain eight-dimensional, the output pair is shared,
 and a compact context code multiplicatively modulates each edge's
 effective conductance. On this corrected benchmark, vanilla contrastive
-learning already learns useful context-conditioned maps, and cumulative
-local importance gives a consistent improvement over vanilla. The best
-cumulative setting reduces mean final MSE from $0.641$ to $0.564$ over
-twelve seeds, and improves both past-task retention and current-task
-fit at the same operating point (a Pareto improvement, not a stability--
-plasticity tradeoff). The evidence so far supports the corrected
-contextual formulation and shows that scalar local importance gives a
-real but bounded retention benefit; the next research step is to design
-richer edge-local importance signals grounded in local activity
-signatures.
+learning already learns useful context-conditioned maps. In the current
+eight-task experiment, which uses eight mutually orthogonal regression
+directions in the eight-dimensional sensory space, cumulative local
+importance substantially improves over vanilla, thresholding, and a slow
+consolidation rule. Mean final MSE drops from $0.756$ for vanilla to
+$0.549$ for cumulative importance over twelve seeds. The evidence so far
+supports the corrected contextual formulation and shows that scalar local
+importance can give a real retention benefit when the task is
+identifiable.
 \end{abstract}
 
 \section{Motivation}
@@ -112,38 +111,59 @@ differences in the two phases.
 
 \section{Why Context Is Needed}
 
-An early version of the benchmark used five orthogonal scalar regression
-tasks,
+An early version of the benchmark used several orthogonal scalar
+regression tasks,
 \[
 y_k = \mathbf{d}_k \cdot \mathbf{x},
 \qquad
 \mathbf{x}\sim\mathcal{N}(0,I),
 \]
 with the same input distribution and the same output pair for every
-task. This formulation is not a valid test of memory unless the task is
-identifiable. The same input $\mathbf{x}$ may require different outputs
-depending on the task, and without context there is no single function
-the substrate can learn that preserves all task maps.
+task. This is not a valid test of memory unless the task is identifiable:
+the same input $\mathbf{x}$ may require different outputs depending on
+which task is active. Without a context signal, there is no single
+function the substrate can learn that preserves all task maps.
 
 The corrected formulation adds task context while keeping the physical
 mesh size fixed. Each sample has an eight-dimensional sensory input and
-a compact context code $\mathbf{c}_k$ identifying the task. The context
-does not simply add to the input-output map; in a linear passive network
-that would only allow terms of the form $a\cdot x + b\cdot c$, which
-cannot express task-dependent slopes. Instead, context modulates the
-effective conductance of each edge:
+a compact context code $\mathbf{c}_k$ identifying the task. The sensory
+input is clamped on the left boundary as before. The context code is not
+used as another additive input channel; in a linear passive network, an
+additive context would only produce terms of the form $a\cdot x + b\cdot
+c$, which cannot express task-dependent slopes. Instead, the context
+acts as a local modulatory signal that changes each edge's effective
+conductance.
+
+In the current implementation, each edge stores a trainable base
+log-conductance $\theta_e$ and a trainable context-sensitivity vector
+$\mathbf{u}_e$. For context $\mathbf{c}$,
 \begin{equation}
 \label{eq:context-mod}
-a_e(\mathbf{c}) = \theta_e + \mathbf{u}_e \cdot \mathbf{c},
-\qquad
-w^{\mathrm{eff}}_e(\mathbf{c}) =
-w_{\min} + \exp(\mathrm{clip}(a_e(\mathbf{c}))).
+a_e(\mathbf{c}) = \theta_e + \mathbf{u}_e \cdot \mathbf{c}.
 \end{equation}
-Here $\theta_e$ is a trainable base log-conductance and $\mathbf{u}_e$
-is a trainable local context-sensitivity vector. Both are stored at the
-edge. This gives the substrate trainable, context-dependent routing
-without increasing the number of sensory input nodes or adding separate
-output heads.
+The effective conductance is then
+\begin{equation}
+\label{eq:context-mod-conductance}
+w^{\mathrm{eff}}_e(\mathbf{c}) =
+w_{\min} + \exp\!\left(M \tanh\!\left(\frac{a_e(\mathbf{c})}{M}\right)\right).
+\end{equation}
+Here $M$ is a log-conductance scale. The hyperbolic tangent smoothly
+bounds the log-conductance in $(-M,M)$, avoiding the hard zero-gradient
+regions that would occur with a clipped exponential. This keeps
+conductances positive and bounded while still allowing saturated edges
+to recover through nonzero gradients.
+
+The task context codes are simplex codes: for $N$ tasks, the $N$ context
+vectors have equal norm and equal pairwise inner product
+$-1/(N-1)$. This gives all task pairs the same overlap through the
+shared context-sensitivity channel, so no pair of tasks is privileged by
+the context representation. In the current eight-task experiment,
+$N=8$ and the context dimension is also $8$.
+
+This mechanism gives the substrate trainable, context-dependent routing
+without increasing the number of sensory input nodes and without adding
+separate output heads. The output pair remains shared across tasks; task
+identity enters by modulating the local physics of each edge.
 
 \section{Learning Rules}
 
@@ -202,51 +222,54 @@ useful conceptual reference for biologically plausible metaplasticity.
 
 \section{Current Experiment}
 
-The main current experiment is a five-task contextual regression sequence.
+The main current experiment is an eight-task contextual regression
+sequence. This deliberately exhausts the sensory task space: the eight
+task directions are mutually orthogonal unit vectors in $\mathbb{R}^8$.
 For each task $k$, targets are
 \[
 y_k = \mathbf{d}_k \cdot \mathbf{x} + \epsilon,
 \]
-where the $\mathbf{d}_k$ are mutually orthogonal unit directions in
-$\mathbb{R}^8$ and $\epsilon$ is small Gaussian noise. The task is made
-identifiable by clamping a context code $\mathbf{c}_k$, which modulates
-edge conductances as in Eq.~\ref{eq:context-mod}. Training is sequential:
-the substrate trains on task $A$, then $B$, and so on through $E$.
+where $\epsilon$ is small Gaussian noise. The task is made identifiable
+by clamping a context code $\mathbf{c}_k$, which modulates edge
+conductances as in Eq.~\ref{eq:context-mod}. Training is sequential: the
+substrate trains on task $A$, then $B$, and so on through $H$.
 
 Evaluation after the final task reports:
 \begin{itemize}
-\item \textbf{past MSE}: average final test MSE on tasks $A$--$D$,
-\item \textbf{current MSE}: final test MSE on task $E$,
+\item \textbf{past MSE}: average final test MSE on tasks $A$--$G$,
+\item \textbf{current MSE}: final test MSE on task $H$,
 \item \textbf{overall MSE}: average final test MSE across all tasks.
 \end{itemize}
 All results below use $12$ seeds, $60$ epochs per task, batch size $32$,
-learning rate $20$, and a $5$-dimensional context code.
+learning rate $20$, and an $8$-dimensional context code.
 
 \section{Current Results}
 
-The corrected contextual setup is learnable. Training each task alone
-with vanilla contrastive learning gives mean single-task MSE
+The corrected contextual setup is learnable. The table below shows the
+test MSE on each task after the full sequence has been trained through
+task $H$:
 \[
-\begin{array}{c|ccccc}
-\text{task} & A & B & C & D & E \\
+\begin{array}{l|cccccccc}
+\text{rule} & A & B & C & D & E & F & G & H \\
 \hline
-\text{MSE} & 0.560 & 0.710 & 0.520 & 0.426 & 0.427
+\text{vanilla} & 0.940 & 1.010 & 0.881 & 0.741 & 0.626 & 0.618 & 0.563 & 0.673\\
+\text{threshold} & 0.927 & 1.042 & 0.873 & 0.776 & 0.602 & 0.647 & 0.574 & 0.648\\
+\text{slow consolidation} & 1.049 & 1.009 & 0.992 & 0.993 & 1.005 & 0.986 & 0.968 & 0.759\\
+\text{cum. importance }(\lambda=50) & 0.616 & 0.815 & 0.582 & 0.494 & 0.485 & 0.433 & 0.462 & 0.506
 \end{array}
 \]
-with overall mean $0.529$. The tasks are not all equally easy for the
-mesh, but they are far below the zero-output baseline of approximately
-$1.0$.
+The final row shows the current task $H$; the other columns show retained
+performance on earlier tasks after subsequent training.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{results/context_modulated_baseline_sweep.png}
-\caption{Baseline sweep on the trainable context-modulated mesh. Left:
-past-mean vs current-task MSE after the five-task sequence; the
-cumulative-importance sweep traces a path that sits on the
-Pareto-improving side of vanilla rather than along a
-stability--plasticity trade. Middle: overall final MSE across rules.
-Right: single-task vanilla capacity. Thresholding and slow
-consolidation do not improve this benchmark.}
+\includegraphics[width=\textwidth]{results/context_modulated_prototype.png}
+\caption{Eight-task contextual sequence on the trainable
+context-modulated mesh. Each row is a learning rule. The left panels show
+final test MSE after all eight tasks have been trained; the right panels
+show MSE trajectories during sequential training. Cumulative importance
+retains earlier tasks much better than vanilla or thresholding, while
+slow consolidation is not competitive in this configuration.}
 \label{fig:context-baseline}
 \end{figure}
 
@@ -256,34 +279,27 @@ The main sequential results are:
 \toprule
 \text{rule} & \text{past MSE} & \text{current MSE} & \text{overall MSE}\\
 \midrule
-\text{vanilla} & 0.676 & 0.499 & 0.641\\
-\text{threshold} & 1.043 & 0.931 & 1.020\\
-\text{slow consolidation} & 1.004 & 0.566 & 0.917\\
-\text{cum. importance }(\lambda=5) & 0.649 & 0.499 & 0.619\\
-\text{cum. importance }(\lambda=10) & 0.642 & 0.500 & 0.614\\
-\text{cum. importance }(\lambda=20) & 0.631 & 0.463 & 0.597\\
-\text{cum. importance }(\lambda=50) & 0.600 & 0.460 & 0.572\\
-\text{cum. importance }(\lambda=100) & 0.593 & 0.447 & 0.564\\
-\text{cum. importance }(\lambda=200) & 0.594 & 0.443 & 0.564\\
+\text{vanilla} & 0.768 & 0.673 & 0.756\\
+\text{threshold} & 0.777 & 0.648 & 0.761\\
+\text{slow consolidation} & 1.000 & 0.759 & 0.970\\
+\text{cum. importance }(\lambda=50) & 0.555 & 0.506 & 0.549\\
 \bottomrule
 \end{array}
 \]
 
-The best cumulative importance setting reduces overall final MSE from
-$0.641$ for vanilla to $0.564$ at $\lambda=100$. In paired differences
+The cumulative importance rule reduces overall final MSE from $0.756$
+for vanilla to $0.549$ at $\lambda=50$. In paired differences
 against vanilla, this corresponds to
 \[
-\Delta \text{past} = -0.083 \pm 0.023,\qquad
-\Delta \text{current} = -0.052 \pm 0.042,\qquad
-\Delta \text{overall} = -0.077 \pm 0.020.
+\Delta \text{past} = -0.213 \pm 0.023,\qquad
+\Delta \text{current} = -0.167 \pm 0.075,\qquad
+\Delta \text{overall} = -0.207 \pm 0.018.
 \]
 Both past-task retention and current-task fit improve at the same
-operating point, so cumulative local importance sits on the
-Pareto-improving side rather than on a stability--plasticity tradeoff
-frontier. Relative to the vanilla-to-single-task forgetting budget of
-$0.641 - 0.529 \approx 0.112$, the best cumulative setting recovers
-about $69\%$. The larger qualitative step was still correcting the
-task formulation by making task context identifiable and trainable.
+operating point. This is the strongest current result: on a hard
+eight-task sequence with no unused orthogonal sensory directions left,
+cumulative local importance improves over vanilla without paying a
+plasticity cost on the final task.
 
 \section{Interpretation}
 
@@ -293,17 +309,16 @@ The current state of the project is best summarized as follows.
 \item A passive edge-coupled mesh can be trained by purely local
 contrastive gradients.
 \item Continual learning benchmarks on this substrate require task
-identifiability. Without context, five orthogonal regressions with the
+identifiability. Without context, multiple orthogonal regressions with the
 same input distribution and same output pair are not a well-posed
 memory problem.
 \item A compact trainable context modulation mechanism makes the
-five-task problem learnable without increasing the number of sensory
+eight-task problem learnable without increasing the number of sensory
 input nodes or adding separate output heads.
-\item Scalar cumulative importance gives a Pareto improvement over
-vanilla contrastive learning: at the chosen operating point both
-past-task retention and current-task fit are better than vanilla,
-recovering roughly $69\%$ of the vanilla-to-single-task forgetting
-budget.
+\item Scalar cumulative importance gives a large improvement over
+vanilla contrastive learning in the eight-task setting: at the chosen
+operating point both past-task retention and current-task fit are better
+than vanilla.
 \item Simple thresholding and the current slow-consolidation rule do not
 improve the contextual benchmark.
 \end{enumerate}
@@ -318,28 +333,97 @@ contributions) is the natural next mechanism step.
 
 \section{Next Steps}
 
-\paragraph{Use local activity signatures.}
-The next promising direction is to build importance from local activity
-signatures rather than scalar gradient magnitudes alone. Each edge can
-observe voltage drops in the free and clamped phases, the local
-contrastive gradient, and the local context-modulated conductance. These
-quantities define an edge-local signature of how that edge participates
-in a task. A better rule should protect changes that would disrupt a
-stored task signature while leaving compatible changes plastic.
+\paragraph{Thermodynamic analysis of dissipation across rules.}
+The most distinctive next step is to evaluate the rules
+thermodynamically, not just by retention. Each substrate update
+dissipates energy: per-edge heat over a training step is the work done
+by the contrastive force on that edge,
+\[
+Q_e = -g_e\,\Delta w_e,
+\]
+summing to a total $Q_{\text{total}} = \sum_e Q_e$ per task. For
+vanilla contrastive learning this reduces to the canonical viscous
+dissipation $\mathrm{lr}\,g_e^2$. For cumulative importance gating the
+proximal pull shrinks $\Delta w_e$ on high-importance edges, which
+should yield a different per-edge dissipation profile: less work spent
+moving the load-bearing edges of past tasks, and more work concentrated
+on a smaller set of edges that the rule has not yet protected. The
+infrastructure to compute this is already in place in the training
+loop; the next experiment is to extract heat trajectories from the
+existing eight-task sweep and plot retention against cumulative
+dissipation for each rule.
 
-\paragraph{Tune and compare against stronger baselines.}
-The cumulative importance sweep should be repeated for longer sequences,
-different context dimensions, and varied task overlap. The most useful
-comparison is not whether a rule beats a zero-output baseline, but
-whether it improves the stability-plasticity frontier over tuned vanilla
-and tuned cumulative importance.
+There is a concrete hypothesis worth distinguishing. If cumulative
+importance genuinely prevents the substrate from relearning what was
+already encoded, the rule should not only improve retention but also
+\emph{reduce} cumulative dissipation across the sequence, by avoiding
+the wasteful learn--forget--relearn cycle that vanilla undergoes. If
+instead the rule merely adds a restoring force without changing the
+trajectory's footprint, it should improve retention while
+\emph{increasing} heat. Distinguishing these two regimes would clarify
+the mechanism in a way that software EWC analyses cannot. Stern et
+al.~\cite{stern2024} frame physical learning as a question of
+dissipation away from the quasistatic limit; the present substrate is
+well-suited to ask the analogous question for the continual-learning
+setting. The deliverable is a retention--dissipation Pareto plot across
+the four rules at their chosen operating points, together with per-edge
+dissipation maps showing where heat is concentrated under each rule.
+
+\paragraph{Scaling: mesh size, task count, and task structure.}
+The eight-task experiment was sized so the orthogonal regression
+directions exhaust the eight-dimensional sensory space --- the hardest
+case the current geometry permits without introducing redundancy. Two
+scaling axes are open. Larger meshes ($16\times 20$, $32\times 40$,
+with proportionally larger sensory boundaries) test whether the
+cumulative-importance advantage grows, shrinks, or holds as substrate
+capacity increases. Longer task sequences --- enabled by increasing the
+sensory dimension --- test whether the benefit persists at sixteen or
+thirty-two orthogonal tasks, or whether the accumulated $I^\star$
+eventually saturates and forces the substrate back toward forgetting. A
+complementary axis is task \emph{structure}: instead of strictly
+orthogonal directions, families with controlled angular overlap, where
+the rule should leave compatible conductance patterns plastic while
+protecting only the directions that genuinely conflict between tasks.
+
+\paragraph{Established continual-learning benchmarks.}
+The synthetic regression sequence keeps the analysis clean, but
+transferring the rule to a recognized benchmark is the natural next
+test. Class-incremental MNIST is the simplest concrete target: ten
+sequential tasks, each adding one digit class, with each task
+identifiable by a context code as in the regression setting. This
+requires a larger mesh boundary (of order $784$ input nodes for
+$28\times 28$ pixels), a multi-class output structure such as several
+differential output pairs or a small linear readout attached to the
+mesh, and head-to-head comparison against software EWC and SI baselines
+on the same task. None of these steps is conceptually difficult, but
+together they are a substantial scope expansion, and the current claims
+should be read as restricted to small-mesh synthetic regression until
+that work is done. Smaller intermediate benchmarks (split
+Fashion-MNIST, Omniglot characters, continual UCI regression) can
+de-risk the transition.
+
+\paragraph{Mechanism variations on the importance signal.}
+A natural alternative to $g_e^2$ is to build the importance signal from
+local activity directly. A first attempt using free-phase squared
+voltage drops $(v_i^F - v_j^F)^2$ beats vanilla but loses to
+$g_e^2$-based cumulative importance, suggesting that purely static
+voltage drops carry mostly substrate-shape information rather than
+task-specific structure. The contrastive shift
+$(v_i^C - v_j^C)^2 - (v_i^F - v_j^F)^2$ is the cleaner candidate to try
+next: it is task-specific by construction (driven by the target nudge)
+and remains strictly edge-local. A second variation worth implementing
+is a context-aware anchor: pull the \emph{effective} conductance
+$w_e^{\mathrm{eff}}(\mathbf{c}_k)$ toward its per-task setpoint rather
+than pulling the bare parameters toward their last endpoint, with
+per-edge state collapsed into running sums so memory remains constant
+in task count.
 
 \paragraph{Biological plausibility.}
-The trainable context sensitivity can be interpreted as a local
-neuromodulatory gain: context changes how strongly each edge participates
-in the network, while plasticity remains edge-local. Future rules should
-move toward synaptic-tagging and metaplastic mechanisms: eligibility
-traces, slow consolidation, and local activity-dependent protection,
+The trainable context sensitivity has a natural neuromodulatory
+reading: context changes how strongly each edge participates in the
+network, while plasticity remains edge-local. Future rules should move
+toward synaptic-tagging and metaplastic mechanisms --- eligibility
+traces, slow consolidation, and local activity-dependent protection ---
 rather than exact software-style Fisher penalties.
 
 \begin{thebibliography}{99}

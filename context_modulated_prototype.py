@@ -19,17 +19,18 @@ from learning_rules import (
     CumulativeImportanceGatedRule,
     SGDRule,
     SlowConsolidatedImportanceRule,
+    ThresholdedSGDRule,
 )
 from network import TrainableContextModulatedMeshSubstrate
 from tasks import make_modulated_context_task_sequence
 
 
 CFG = {
-    "rows": 8,
+    "rows": 8, 
     "cols": 10,
     "n_sensory": 8,
-    "context_dim": 5,
-    "n_tasks": 5,
+    "context_dim": 8,
+    "n_tasks": 8,
     "out_pos_row": 3,
     "out_neg_row": 4,
     "n_train": 500,
@@ -38,18 +39,22 @@ CFG = {
     "n_epochs": 60,
     "batch_size": 32,
     "curve_eval_every": 16,
-    "n_seeds": 3,
+    "n_seeds": 12,
     "lr": 20.0,
     "eta": 0.005,
     "context_init_std": 0.0,
     "max_log_extra": 4.0,
     "lam_cum": 50.0,
     "lam_slow": 0.3,
+    # Gradients in the trainable log/context parameterization are much smaller
+    # than raw conductance gradients in the original mesh experiments.
+    "thresh_tau": 1e-4,
 }
 
 
 RULE_COLOR = {
     "vanilla": "C0",
+    "thresh": "C1",
     "cum_imp_gated": "C3",
     "slow_consolidated": "C6",
 }
@@ -73,6 +78,7 @@ def make_substrate(seed):
 def make_rules():
     return [
         SGDRule(lr=CFG["lr"]),
+        ThresholdedSGDRule(lr=CFG["lr"], threshold=CFG["thresh_tau"]),
         CumulativeImportanceGatedRule(lr=CFG["lr"], lam=CFG["lam_cum"]),
         SlowConsolidatedImportanceRule(lr=CFG["lr"], lam=CFG["lam_slow"]),
     ]

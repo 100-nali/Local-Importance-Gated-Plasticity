@@ -1,0 +1,30 @@
+Thermodynamic analysis (8 tasks, trainable context-modulated mesh)
+  seeds=12  epochs/task=60  lr=20.0  rules=vanilla / threshold(tau=0.0001) / cum_imp(λ=50.0) / slow_consolidated(λ=0.3)
+  seed=0 done
+  seed=1 done
+  seed=2 done
+  seed=3 done
+  seed=4 done
+  seed=5 done
+  seed=6 done
+  seed=7 done
+  seed=8 done
+  seed=9 done
+  seed=10 done
+  seed=11 done
+
+Final MSE and cumulative dissipation:
+  rule                        cum heat      past   current   overall
+  vanilla                   35.53±1.98     0.768     0.673     0.756
+  thresh                    34.93±2.07     0.777     0.648     0.761
+  cum_imp_gated             37.74±1.63     0.555     0.506     0.549
+  slow_consolidated         46.59±3.26     1.000     0.759     0.970
+
+Paired vs vanilla (negative = lower dissipation / lower error):
+  rule                      Δ cum heat     Δ overall MSE
+  thresh                    -0.60±0.79        0.005±0.010
+  cum_imp_gated              2.21±2.35       -0.207±0.018
+  slow_consolidated         11.06±3.47        0.214±0.019
+
+Saved /Users/sonaligoel/Desktop/local-importance-gated-plasticity/results/thermodynamic_analysis.json
+Saved /Users/sonaligoel/Desktop/local-importance-gated-plasticity/results/thermodynamic_analysis.png

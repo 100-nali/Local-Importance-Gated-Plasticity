@@ -550,7 +550,7 @@ class TrainableContextModulatedMeshSubstrate(ContextModulatedMeshSubstrate):
     Each edge has a base log-conductance and a vector of context gains:
 
         a_e(c)       = theta_e + u_e · c
-        w_eff,e(c)  = w_min + exp(clip(a_e(c)))
+        w_eff,e(c)  = w_min + exp(M * tanh(a_e(c) / M))
 
     Both theta_e and u_e are trainable edge-local parameters. This is the
     proper context prototype: the substrate can learn how context changes each
